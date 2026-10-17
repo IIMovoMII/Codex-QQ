@@ -12,7 +12,7 @@
 [![检查](https://github.com/IIMovoMII/Codex-QQ/actions/workflows/check.yml/badge.svg)](https://github.com/IIMovoMII/Codex-QQ/actions/workflows/check.yml)
 [![MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-[开始使用](docs/install.md) · [操作手册](docs/usage.md) · [常见问题](docs/troubleshooting.md) · [参与开发](docs/development.md)
+[一句话安装](#一句话安装) · [操作手册](docs/usage.md) · [常见问题](docs/troubleshooting.md) · [参与开发](docs/development.md)
 
 </div>
 
@@ -64,6 +64,18 @@
 
 ## 开始使用
 
+### 一句话安装
+
+把这句话发给**能操作你本机文件和终端的 Codex、Claude 等智能体**：
+
+~~~text
+请阅读 https://github.com/IIMovoMII/Codex-QQ ，按照智能体安装指南在我的电脑上部署 Codex-QQ，并引导我绑定 QQ 机器人。
+~~~
+
+智能体会按[安装指南](docs/agent-install.md)检查环境、下载源码、构建和配置应用。需要你操作时，再引导你创建机器人、在本机填写密钥、绑定本人 QQ 和确认钩子信任；不需要先学会这些命令。没有本机操作能力的网页聊天只能提供指导。
+
+### 手动安装
+
 当前发布的是 **Windows 源码版**，不是双击即用的通用安装器。需要自己的 QQ 官方机器人、可用的 Codex Desktop，以及 Python 3.11+。首次构建还需要 Git 和 Go 1.25+；Python 侧不用安装第三方包。
 
 ~~~powershell
@@ -76,8 +88,8 @@ py -3 -X utf8 tools/build_resident_app.py
 然后按[首次安装指南](docs/install.md)完成三件事：
 
 1. 配置自己的机器人，并在 QQ 私聊中绑定自己的身份。
-2. 合并本程序的 Codex 钩子，在 Desktop 核对并信任。
-3. 打开 `bin/CodexQQ助手.exe`，向机器人发「帮助」。
+2. 打开 `bin/CodexQQ助手.exe`，再合并本程序的 Codex 钩子，在 Desktop 核对并信任。
+3. 向机器人发「帮助」，检查选定对话、发送任务和结果提醒。
 
 首次配置工具不会覆盖已有安装，不会替你改模型、登录态或历史。自启由托盘菜单手动开启。
 
