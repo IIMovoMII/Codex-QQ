@@ -1,0 +1,35 @@
+# Local handover notes contain machine paths, incident IDs and private context.
+/PROJECT_STATUS.md
+/QQ_CONTROL_IMPLEMENTATION_PLAN.md
+/QQ_CONTROL_MANUAL_TESTS.md
+/NATIVE_INTERFACES.md
+
+# Built locally; no binaries or machine-specific runtime descriptor in Git.
+/bin/
+/vendor/**/bin/
+/.build/
+/dist/
+__pycache__/
+*.py[cod]
+*.exe
+*.dll
+*.zip
+.venv/
+.pytest_cache/
+
+# Credentials and runtime state must stay outside the checkout.
+.env
+.env.*
+auth.json
+settings.json
+config.toml
+*.sqlite*
+*.db
+*.jsonl
+*.log
+app-runtime.json
+logs/
+outbox/
+spool/
+.DS_Store
+Thumbs.db

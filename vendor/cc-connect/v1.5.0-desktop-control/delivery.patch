@@ -1,0 +1,259 @@
+diff --git a/core/engine.go b/core/engine.go
+index e40f25c..57c478d 100644
+--- a/core/engine.go
++++ b/core/engine.go
+@@ -10943,6 +10945,12 @@ func (e *Engine) SendToSessionWithOptions(sessionKey, message string, images []I
+ 	if err != nil {
+ 		return err
+ 	}
++	if provider, ok := p.(ProactiveContextProvider); ok {
++		replyCtx, err = provider.ProactiveReplyContext(replyCtx)
++		if err != nil {
++			return fmt.Errorf("prepare proactive context: %w", err)
++		}
++	}
+ 
+ 	if message == "" && len(images) == 0 && len(files) == 0 {
+ 		return fmt.Errorf("message or attachment is required")
+diff --git a/platform/qqbot/qqbot.go b/platform/qqbot/qqbot.go
+index df14eb9..7e8a2c1 100644
+--- a/platform/qqbot/qqbot.go
++++ b/platform/qqbot/qqbot.go
+@@ -33,7 +33,7 @@ const (
+ 	maxReconnectAttempts = 30
+ 	tokenRefreshMargin   = 5 * time.Minute
+ 	messageMaxLen        = 2000
+-	msgSeqTTL            = 5 * time.Minute
++	msgSeqTTL            = 2 * time.Hour // C2C passive replies can remain valid for 60 minutes.
+ 	messageCacheTTL      = 7 * 24 * time.Hour
+ 	messageCacheMaxItems = 1000
+ 	quotedTextMaxRunes   = 800
+@@ -1364,17 +1370,28 @@ func (p *Platform) sendMessage(rctx *replyContext, content string) error {
+ 	var resp struct {
+ 		ID    string `json:"id"`
+ 		MsgID string `json:"msg_id"`
++		Code  int `json:"code"`
+ 	}
+ 	if err := p.apiRequestJSON("POST", url, body, &resp); err != nil {
+ 		return err
+ 	}
++	if resp.Code != 0 {
++		return fmt.Errorf("qqbot: message rejected with code %d", resp.Code)
++	}
+ 	msgID := strings.TrimSpace(resp.ID)
+ 	if msgID == "" {
+ 		msgID = strings.TrimSpace(resp.MsgID)
+ 	}
+-	if msgID != "" {
+-		p.cacheMessage(msgID, content)
+-	}
++	if msgID == "" {
++		return fmt.Errorf("qqbot: message acceptance missing ID; outcome unknown")
++	}
++	p.cacheMessage(msgID, content)
++	mode := "active"
++	if rctx.eventMsgID != "" { mode = "passive" }
++	slog.Info("qqbot: message accepted", "mode", mode, "message_hash", deliveryHash(msgID),
++		"target_hash", deliveryHash(rctx.userOpenID+":"+rctx.groupOpenID),
++		"event_hash", deliveryHash(rctx.eventMsgID), "sequence", body["msg_seq"],
++		"content_hash", deliveryHash(content))
+ 	return nil
+ }
+ 
+--- /dev/null
++++ b/core/proactive_context.go
+@@ -0,0 +1,7 @@
++package core
++
++// ProactiveContextProvider separates an independent outbound send from an
++// immediate reply to an inbound event. Optional, to preserve other platforms.
++type ProactiveContextProvider interface {
++	ProactiveReplyContext(replyCtx any) (any, error)
++}
+--- /dev/null
++++ b/core/proactive_context_test.go
+@@ -0,0 +1,60 @@
++package core
++
++import (
++	"context"
++	"fmt"
++	"path/filepath"
++	"testing"
++	"time"
++)
++
++type proactiveContextProbe struct {
++	stubPlatformEngine
++	lastContext any
++}
++
++func (p *proactiveContextProbe) ProactiveReplyContext(value any) (any, error) {
++	return "active-target", nil
++}
++
++func (p *proactiveContextProbe) Send(ctx context.Context, value any, content string) error {
++	p.lastContext = value
++	return p.stubPlatformEngine.Send(ctx, value, content)
++}
++
++func TestCUJ_P1_IndependentNotificationDoesNotReusePassiveReply(t *testing.T) {
++	p := &proactiveContextProbe{stubPlatformEngine: stubPlatformEngine{n: "test"}}
++	agent := &cujAgent{}
++	e := NewEngine("test", agent, []Platform{p}, filepath.Join(t.TempDir(), "sessions.json"), LangEnglish)
++	t.Cleanup(func() { _ = e.Stop() })
++	sendUser := func(id, text string) {
++		previous := len(p.getSent())
++		e.ReceiveMessage(p, &Message{SessionKey: "test:user", Platform: "test", MessageID: id,
++			UserID: "user", Content: text, ReplyCtx: "passive:" + id})
++		deadline := time.Now().Add(2 * time.Second)
++		for time.Now().Before(deadline) {
++			if len(p.getSent()) > previous {
++				return
++			}
++			time.Sleep(10 * time.Millisecond)
++		}
++		t.Fatalf("user reply not observed: %s", fmt.Sprint(p.getSent()))
++	}
++	sendUser("user-event-1", "first request")
++	sendUser("user-event-2", "second request")
++	if err := e.SendToSessionWithOptions("test:user", "independent quota alert", nil, nil, SendOptions{}); err != nil {
++		t.Fatal(err)
++	}
++	if p.lastContext != "active-target" {
++		t.Fatalf("independent alert reused stale incoming context: %v", p.lastContext)
++	}
++	e.interactiveMu.Lock()
++	state := e.interactiveStates["test:user"]
++	e.interactiveMu.Unlock()
++	state.mu.Lock()
++	context := state.replyCtx
++	state.mu.Unlock()
++	if context != "passive:user-event-2" {
++		t.Fatalf("inbound reply context was modified: %v", context)
++	}
++}
+--- /dev/null
++++ b/platform/qqbot/delivery.go
+@@ -0,0 +1,27 @@
++package qqbot
++
++import (
++	"crypto/sha256"
++	"encoding/hex"
++	"fmt"
++)
++
++// Independent sends must not reuse an inbound event's finite reply window or
++// reply sequence. Clone the context so regular inbound replies are untouched.
++func (p *Platform) ProactiveReplyContext(value any) (any, error) {
++	original, ok := value.(*replyContext)
++	if !ok || original == nil {
++		return nil, fmt.Errorf("qqbot: invalid proactive context")
++	}
++	copy := *original
++	// Independent notifications must always be active messages. Reusing an
++	// inbound event ID would make delayed notifications look like passive
++	// replies and can leave them visible only as a phone notification.
++	copy.eventMsgID = ""
++	return &copy, nil
++}
++
++func deliveryHash(value string) string {
++	hash := sha256.Sum256([]byte(value))
++	return hex.EncodeToString(hash[:8])
++}
+--- /dev/null
++++ b/platform/qqbot/delivery_test.go
+@@ -0,0 +1,91 @@
++package qqbot
++
++import (
++	"context"
++	"encoding/json"
++	"fmt"
++	"github.com/chenhg5/cc-connect/core"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++	"time"
++)
++
++func TestPassiveSequenceDoesNotResetDuringC2CReplyWindow(t *testing.T) {
++	p := &Platform{}
++	if p.nextMsgSeq("same-inbound-event") != 1 {
++		t.Fatal("first sequence")
++	}
++	p.msgSeqMap["same-inbound-event"].createdAt = time.Now().Add(-13 * time.Minute)
++	if got := p.nextMsgSeq("same-inbound-event"); got != 2 {
++		t.Fatalf("sequence reused after five minutes: got %d, want 2", got)
++	}
++}
++
++func TestIndependentMessageOmitsPassiveFieldsAndPreservesInboundContext(t *testing.T) {
++	var body map[string]any
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		_ = json.NewDecoder(r.Body).Decode(&body)
++		_, _ = fmt.Fprint(w, `{"id":"accepted-id"}`)
++	}))
++	defer server.Close()
++	previousClient, previousURL := core.HTTPClient, apiBaseProduction
++	core.HTTPClient, apiBaseProduction = server.Client(), server.URL
++	t.Cleanup(func() { core.HTTPClient, apiBaseProduction = previousClient, previousURL })
++	p := &Platform{token: "test-token", tokenExpiry: time.Now().Add(time.Hour)}
++	incoming := &replyContext{messageType: "c2c", userOpenID: "user", eventMsgID: "old-event", sessionKey: "qqbot:user"}
++	active, err := p.ProactiveReplyContext(incoming)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err = p.Send(context.Background(), active, "quota notification"); err != nil {
++		t.Fatal(err)
++	}
++	if _, ok := body["msg_id"]; ok {
++		t.Fatal("independent notification has passive msg_id")
++	}
++	if _, ok := body["msg_seq"]; ok {
++		t.Fatal("independent notification has passive sequence")
++	}
++	if incoming.eventMsgID != "old-event" {
++		t.Fatal("incoming context changed")
++	}
++	if err = p.Reply(context.Background(), incoming, "immediate reply"); err != nil {
++		t.Fatal(err)
++	}
++	if body["msg_id"] != "old-event" || body["msg_seq"] != float64(1) {
++		t.Fatal("regular reply lost its inbound identity")
++	}
++}
++
++func TestIndependentMessageClearsPassiveContextForGroup(t *testing.T) {
++	p := &Platform{}
++	incoming := &replyContext{messageType: "group", eventMsgID: "old-group-event", sessionKey: "qqbot:group"}
++	active, err := p.ProactiveReplyContext(incoming)
++	if err != nil {
++		t.Fatal(err)
++	}
++	got := active.(*replyContext)
++	if got.eventMsgID != "" {
++		t.Fatalf("group proactive context retained passive event id %q", got.eventMsgID)
++	}
++	if incoming.eventMsgID != "old-group-event" {
++		t.Fatal("group inbound context changed")
++	}
++}
++
++func TestMessageAcceptanceRequiresIDAndRejectsBusinessError(t *testing.T) {
++	for _, raw := range []string{`{}`, `{"code":40054005,"id":"fake-id"}`} {
++		t.Run(raw, func(t *testing.T) {
++			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = fmt.Fprint(w, raw) }))
++			defer server.Close()
++			previousClient, previousURL := core.HTTPClient, apiBaseProduction
++			core.HTTPClient, apiBaseProduction = server.Client(), server.URL
++			t.Cleanup(func() { core.HTTPClient, apiBaseProduction = previousClient, previousURL })
++			p := &Platform{token: "test-token", tokenExpiry: time.Now().Add(time.Hour)}
++			if err := p.Send(context.Background(), &replyContext{messageType: "c2c", userOpenID: "user"}, "alert"); err == nil {
++				t.Fatal("accepted error/empty receipt")
++			}
++		})
++	}
++}

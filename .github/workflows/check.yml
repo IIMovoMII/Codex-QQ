@@ -1,0 +1,48 @@
+name: 检查
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  python:
+    name: Windows / Python ${{ matrix.python }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.13']
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: 构建原生启动入口
+        run: python -X utf8 tools/build_resident_app.py
+      - name: 隔离回归
+        run: python -X utf8 -m unittest discover -s tests -v
+      - name: 公开文件与本地链接
+        run: python -X utf8 tools/check_publication.py
+  gateway:
+    name: 配套 QQ 网关构建
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: false
+      - name: 核对基线、应用补丁、仅构建 ACP 和 QQ
+        run: python -X utf8 tools/prepare_gateway.py
