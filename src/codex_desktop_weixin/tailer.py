@@ -25,7 +25,10 @@ def canonical_path_key(path: str | Path) -> str:
             value = "\\\\" + value[8:]
         elif folded.startswith("\\\\?\\"):
             value = value[4:]
-        return os.path.normcase(os.path.abspath(os.path.normpath(value)))
+        # Windows may supply an 8.3 alias (RUNNER~1) in TEMP/hooks while
+        # Path.resolve() yields the long spelling. Both must share a cursor,
+        # just like device-prefixed paths; otherwise a lookup can miss it.
+        return os.path.normcase(os.path.realpath(os.path.abspath(os.path.normpath(value))))
     return str(Path(value).resolve())
 
 

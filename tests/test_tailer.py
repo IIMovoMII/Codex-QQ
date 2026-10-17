@@ -5,6 +5,7 @@ import os
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 
@@ -20,6 +21,13 @@ def line(payload: dict, outer: str = "event_msg") -> bytes:
 
 
 class TailerTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == 'nt', 'Windows short path aliases')
+    def test_short_and_long_windows_paths_share_the_same_key(self):
+        short = r'C:\Temp\EXAMPL~1\rollout.jsonl'
+        long = r'C:\Temp\Example Person\rollout.jsonl'
+        with patch('tailer.os.path.realpath', side_effect=lambda p: long if 'EXAMPL~1' in p else p):
+            self.assertEqual(canonical_path_key(short), canonical_path_key(long))
+
     def test_reads_only_complete_new_lines_and_persists_cursor(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

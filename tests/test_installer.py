@@ -38,7 +38,7 @@ class InstallerTests(unittest.TestCase):
                 capture_output=True, encoding="utf-8", timeout=5,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(json.loads(result.stdout), [str(probe), "hook"])
+            self.assertEqual(json.loads(result.stdout), [str(probe.resolve()), "hook"])
 
     def test_hook_command_uses_absolute_python(self) -> None:
         command = build_hook_command(Path(r"D:\codex-desktop-weixin\cli.py"))

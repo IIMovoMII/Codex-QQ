@@ -24,7 +24,7 @@ py -3 -X utf8 tools/prepare_gateway.py
 py -3 -X utf8 tools/build_resident_app.py
 ```
 
-网关构建获取固定的 CC Connect 源码、验证提交、应用两份补丁，再只编译 ACP 和 QQ 通道。首次下载 Go 依赖可能较慢；构建时的 CPU 占用不代表应用待机占用。
+网关构建获取固定的 CC Connect 源码、验证提交、应用配套补丁，再只编译 ACP 和 QQ 通道。首次下载 Go 依赖可能较慢；构建时的 CPU 占用不代表应用待机占用。
 
 生成的 `bin/CodexQQ助手.exe` 仍依赖当前目录的源码和本机 Python，**不是可复制到另一台电脑的单文件程序**。安装后不要随意搬动目录或删除 Python。更新和路径迁移见[开发说明](development.md)。
 
