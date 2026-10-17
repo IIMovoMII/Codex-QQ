@@ -70,7 +70,7 @@
 把这句话发给**能操作你本机文件和终端的 Codex、Claude 等智能体**：
 
 ~~~text
-请阅读 https://github.com/IIMovoMII/Codex-QQ ，按照智能体安装指南在我的电脑上部署 Codex-QQ，并引导我绑定 QQ 机器人。
+阅读 https://github.com/IIMovoMII/Codex-QQ ，按照智能体安装指南在我的电脑上部署 Codex-QQ。
 ~~~
 
 智能体会按[安装指南](docs/agent-install.md)检查环境、下载源码、构建和配置应用。需要你操作时，再引导你创建机器人、在本机填写密钥、绑定本人 QQ 和确认钩子信任；不需要先学会这些命令。没有本机操作能力的网页聊天只能提供指导。
