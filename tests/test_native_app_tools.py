@@ -16,6 +16,7 @@ from native_app_tools import NativeAppTools
 THREAD = '01a10000-0000-7000-8000-000000000001'
 CHILD = '01a10000-0000-7000-8000-000000000002'
 ENDPOINT = r'\\.\pipe\codex-browser-use-00000000-0000-0000-0000-000000000000'
+CURRENT_ENDPOINT = ENDPOINT.replace('codex-browser-use-', 'codex-app-tools-')
 PROJECT = {'id': 'project-one', 'name': '中文项目', 'path': 'D:/中文 空格'}
 
 
@@ -25,6 +26,7 @@ class Service:
         self.schemas = {name: {'type': 'object'} for name in self.names}
         self.writes = []
         self.titles = {THREAD: '旧标题'}
+        self.statuses = {}
         self.projects = [dict(PROJECT)]
         self.timeout_tool = None
         self.failed_tool = None
@@ -72,7 +74,7 @@ class Pipe:
                 ident = args['threadId']
                 data = {'thread': {'id': ident, 'kind': 'codex', 'hostId': 'local', 'updatedAt': 100,
                                    'title': 'wrong' if self.s.wrong_readback else self.s.titles[ident],
-                                   'status': {'type': 'idle'}, 'cwd': 'D:/中文 空格'},
+                                   'status': {'type': self.s.statuses.get(ident, 'idle')}, 'cwd': 'D:/中文 空格'},
                         'page': {'order': self.s.order}, 'turns': copy.deepcopy(self.s.turns.get(ident, []))}
             elif tool == 'list_projects':
                 data = {'projects': [{'projectId': p['id'], 'label': p['name'], 'path': p['path'],
@@ -88,6 +90,7 @@ class Pipe:
                 self.s.turns[CHILD] = copy.deepcopy(self.s.turns[THREAD])
                 data = self.s.fork_result
             elif tool == 'navigate_to_codex_page':
+                self.s.statuses[args['threadId']] = 'idle'
                 data = {'navigated': True}
             else:
                 raise AssertionError('unexpected tool')
@@ -351,6 +354,98 @@ class NativeToolTests(unittest.TestCase):
             hint.write_text(json.dumps({'version': 1, 'path': fresh}), encoding='utf-8')
             with patch.dict(os.environ, {'CODEX_APP_TOOLS_PIPE_PATH': ENDPOINT}):
                 self.assertEqual(NativeAppTools(hint_path=hint)._path(), fresh)
+
+
+class EndpointRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.hint = Path(self.tmp.name) / 'hint.json'
+        self.hint.write_text(json.dumps({'version': 1, 'path': ENDPOINT}), encoding='utf-8')
+        self.service = Service()
+        self.attempts = []
+        self.discovery = unittest.mock.Mock(return_value=[CURRENT_ENDPOINT])
+        self.env = patch.dict(os.environ, {'CODEX_APP_TOOLS_PIPE_PATH': ''})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+
+    def client(self, factory=None):
+        def connect(**options):
+            self.attempts.append(options['path'])
+            if options['path'] == ENDPOINT:
+                raise FileNotFoundError('stale fixture endpoint')
+            return self.service.factory(**options)
+        return NativeAppTools(pipe_factory=factory or connect,
+                              identity_reader=lambda _: (self.service.identity, 1.0, 'trusted-app'),
+                              contract_check=lambda _: None, hint_path=self.hint,
+                              endpoint_discovery=self.discovery)
+
+    def test_missing_hint_does_not_hide_current_environment(self):
+        with patch.dict(os.environ, {'CODEX_APP_TOOLS_PIPE_PATH': CURRENT_ENDPOINT}):
+            self.assertEqual(self.client().open_thread(THREAD, 'desktop-one', 'open-one'), {'state': 'confirmed'})
+        self.discovery.assert_not_called()
+        calls = [x for x in self.service.writes if x.get('params', {}).get('tool') == 'navigate_to_codex_page']
+        self.assertEqual(len(calls), 1)
+
+    def test_no_hook_or_inherited_environment_discovers_once_and_caches_verified_endpoint(self):
+        client = self.client()
+        self.assertEqual(client.thread(THREAD, 'desktop-one')['id'], THREAD)
+        self.assertEqual(client.open_thread(THREAD, 'desktop-one', 'open-one'), {'state': 'confirmed'})
+        self.discovery.assert_called_once_with()
+        self.assertEqual(self.attempts.count(ENDPOINT), 1)
+
+    def test_many_sleeping_chats_share_endpoint_but_never_share_target(self):
+        client = self.client()
+        targets = [f'01a10000-0000-7000-8000-{i:012d}' for i in range(20, 32)]
+        for index, target in enumerate(targets):
+            self.service.titles[target] = f'不同项目的旧对话 {index}'
+            self.service.statuses[target] = 'notLoaded'
+            self.assertEqual(client.thread(target, 'desktop-one')['status']['type'], 'notLoaded')
+            self.assertEqual(client.open_thread(target, 'desktop-one', f'open-{index}'), {'state': 'confirmed'})
+            self.assertEqual(client.thread(target, 'desktop-one')['id'], target)
+        calls = [x['params'] for x in self.service.writes
+                 if x.get('params', {}).get('tool') == 'navigate_to_codex_page']
+        self.assertEqual([p['arguments']['threadId'] for p in calls], targets)
+        self.assertEqual([p['threadId'] for p in calls], targets)
+        self.assertEqual(len({p['callId'] for p in calls}), len(targets))
+        self.discovery.assert_called_once_with()
+
+    def test_desktop_restart_rediscovers_without_a_session_start_hook(self):
+        client = self.client()
+        client.thread(THREAD, 'desktop-one')
+        new_endpoint = CURRENT_ENDPOINT.replace('00000000', '11111111')
+        self.service.identity = 'desktop-two'
+        self.discovery.return_value = [new_endpoint]
+        self.assertEqual(client.open_thread(THREAD, 'desktop-two', 'after-restart'), {'state': 'confirmed'})
+        self.assertEqual(self.discovery.call_count, 2)
+        self.assertEqual(self.attempts[-1], new_endpoint)
+
+    def test_foreign_pipe_is_never_sent_even_a_catalog_request(self):
+        foreign = Service()
+        def connect(**options):
+            if options['path'] == ENDPOINT:
+                return foreign.factory(**options)
+            return self.service.factory(**options)
+        client = self.client(connect)
+        client.identity_reader = lambda p: ('foreign' if p.s is foreign else 'desktop-one', 1.0, 'trusted-app')
+        self.assertEqual(client.open_thread(THREAD, 'desktop-one', 'open-one'), {'state': 'confirmed'})
+        self.assertEqual(foreign.writes, [])
+
+    def test_lost_mutation_confirmation_never_discovers_or_dispatches_again(self):
+        self.hint.write_text(json.dumps({'version': 1, 'path': CURRENT_ENDPOINT}), encoding='utf-8')
+        self.service.timeout_tool = 'navigate_to_codex_page'
+        self.assertEqual(self.client().open_thread(THREAD, 'desktop-one', 'open-once')['state'], 'unknown')
+        self.discovery.assert_not_called()
+        calls = [x for x in self.service.writes if x.get('params', {}).get('tool') == 'navigate_to_codex_page']
+        self.assertEqual(len(calls), 1)
+
+    def test_discovery_never_opens_unrelated_names_or_unbounded_candidates(self):
+        self.discovery.return_value = ['https://example.test', r'\\.\pipe\other-service'] + [
+            CURRENT_ENDPOINT.replace('00000000', f'{i:08d}', 1) for i in range(100)]
+        self.service.identity = 'foreign'
+        self.assertEqual(self.client().open_thread(THREAD, 'desktop-one', 'open-one')['state'], 'rejected')
+        self.assertLessEqual(len(self.service.opens), 16)
+        self.assertTrue(all(p['path'].startswith(r'\\.\pipe\codex-app-tools-') for p in self.service.opens))
 
 
 if __name__ == '__main__':

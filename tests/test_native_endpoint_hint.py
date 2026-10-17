@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src' / 'codex_desktop_weixin'))
 import launcher
+from endpoint_hint import discover_native_endpoints
 
 ENDPOINT = r'\\.\pipe\codex-browser-use-00000000-0000-0000-0000-000000000000'
 
@@ -36,6 +37,12 @@ class EndpointHintTests(unittest.TestCase):
         self.start(changed)
         self.assertEqual(json.loads(self.hint.read_text(encoding='utf-8'))['path'], changed)
 
+    def test_current_app_tools_name_is_captured_without_restarting_gateway(self):
+        endpoint = ENDPOINT.replace('codex-browser-use-', 'codex-app-tools-')
+        self.assertEqual(self.start(endpoint)['reason'], 'already_running')
+        self.assertEqual(json.loads(self.hint.read_text(encoding='utf-8')),
+                         {'version': 1, 'path': endpoint})
+
     def test_unchanged_hint_is_not_rewritten_each_service_check(self):
         self.start(ENDPOINT)
         with patch('endpoint_hint.atomic_write_json') as write:
@@ -52,6 +59,21 @@ class EndpointHintTests(unittest.TestCase):
     def test_hint_write_failure_never_prevents_existing_notification_service(self):
         with patch('endpoint_hint.atomic_write_json', side_effect=OSError('fixture')):
             self.assertEqual(self.start(ENDPOINT)['cc_connect_api_status'], 'ready')
+
+    def test_on_demand_inventory_filters_names_and_prefers_current_service(self):
+        current = ENDPOINT.replace('codex-browser-use-', 'codex-app-tools-')
+        names = [ENDPOINT.rsplit('\\', 1)[-1], 'another-service', current.rsplit('\\', 1)[-1],
+                 'codex-app-tools-short', 'codex-app-tools-' + '../' * 20]
+        with patch('endpoint_hint.os.name', 'nt'), patch('endpoint_hint.os.listdir', return_value=names) as listing:
+            self.assertEqual(discover_native_endpoints(), (current, ENDPOINT))
+            listing.assert_called_once_with('\\\\.\\pipe\\')
+
+    def test_excess_or_unavailable_inventory_is_bounded_and_fail_closed(self):
+        names = ['codex-app-tools-' + f'{i:036d}' for i in range(17)]
+        with patch('endpoint_hint.os.name', 'nt'), patch('endpoint_hint.os.listdir', return_value=names):
+            self.assertEqual(discover_native_endpoints(), ())
+        with patch('endpoint_hint.os.name', 'nt'), patch('endpoint_hint.os.listdir', side_effect=OSError('fixture')):
+            self.assertEqual(discover_native_endpoints(), ())
 
 
 if __name__ == '__main__':

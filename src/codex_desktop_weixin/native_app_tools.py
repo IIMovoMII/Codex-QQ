@@ -9,17 +9,20 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 import uuid
+from contextlib import ExitStack, contextmanager
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
 from desktop_control import DesktopControlError, WindowsDesktopPipe, pipe_server_identity
 from control_contract import check_app_tools_contract
 from tool_schema import validate_arguments
+from endpoint_hint import PIPE_NAME, MAX_ENDPOINT_CANDIDATES, discover_native_endpoints
 
 ALLOWED_TOOLS = frozenset({'read_thread', 'list_projects', 'set_thread_title', 'create_thread', 'fork_thread', 'navigate_to_codex_page'})
 WRITE_TOOLS = frozenset({'set_thread_title', 'create_thread', 'fork_thread', 'navigate_to_codex_page'})
-PIPE_NAME = re.compile(r'^\\\\\.\\pipe\\codex-browser-use-[A-Za-z0-9_-]{20,100}$')
 THREAD_ID = re.compile(r'^[A-Za-z0-9_-]{20,100}$')
 
 
@@ -31,10 +34,13 @@ class NativeAppTools:
     def __init__(self, *, pipe_factory: Any = WindowsDesktopPipe,
                  identity_reader: Any = pipe_server_identity,
                  contract_check: Any = check_app_tools_contract,
-                 endpoint: str | None = None, hint_path: Path | None = None) -> None:
+                 endpoint: str | None = None, hint_path: Path | None = None,
+                 endpoint_discovery: Any = discover_native_endpoints) -> None:
         self.pipe_factory, self.identity_reader = pipe_factory, identity_reader
         self.contract_check, self.endpoint = contract_check, endpoint
         self.hint_path = hint_path
+        self.endpoint_discovery = endpoint_discovery
+        self._resolved_endpoint: tuple[str, str] | None = None
 
     def _path(self) -> str:
         value = self.endpoint
@@ -50,14 +56,66 @@ class NativeAppTools:
             except (OSError, ValueError):
                 pass
             # A resident gateway may inherit yesterday's Desktop environment.
-            # Prefer a refreshed hook hint before connecting. No retry/fallback
-            # occurs after dispatch; real server identity is still mandatory.
+            # Prefer a refreshed hook hint initially, but it is never proof that
+            # this path still exists or belongs to the current Desktop.
             value = value or os.environ.get('CODEX_APP_TOOLS_PIPE_PATH', '')
         if not isinstance(value, str):
             raise NativeToolError('native-app-tools-endpoint-unavailable')
         if not PIPE_NAME.fullmatch(value):
             raise NativeToolError('native-app-tools-endpoint-unavailable')
         return value
+
+    def _candidate_paths(self, expected_identity: str):
+        # An explicit override is strict: invalid/missing does not enable scan.
+        if self.endpoint is not None:
+            yield self._path()
+            return
+        seen: set[str] = set()
+        cached = self._resolved_endpoint
+        if cached is not None and cached[0] == expected_identity:
+            seen.add(cached[1])
+            yield cached[1]
+        try:
+            hinted = self._path()
+        except NativeToolError:
+            hinted = ''
+        for value in (hinted, os.environ.get('CODEX_APP_TOOLS_PIPE_PATH', '')):
+            if isinstance(value, str) and PIPE_NAME.fullmatch(value) and value not in seen:
+                seen.add(value)
+                yield value
+        # Only reached if cached/hook/environment candidates could not connect.
+        for value in islice(self.endpoint_discovery(), MAX_ENDPOINT_CANDIDATES):
+            if len(seen) >= MAX_ENDPOINT_CANDIDATES:
+                break
+            if isinstance(value, str) and PIPE_NAME.fullmatch(value) and value not in seen:
+                seen.add(value)
+                yield value
+
+    @contextmanager
+    def _connection(self, expected_identity: str, timeout_seconds: float):
+        deadline = time.monotonic() + timeout_seconds
+        for path in self._candidate_paths(expected_identity):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            with ExitStack() as stack:
+                try:
+                    pipe = stack.enter_context(self.pipe_factory(timeout_seconds=min(2.0, remaining), path=path))
+                    self._validate_server(pipe, expected_identity)
+                    catalog = self._rpc(pipe, 'tools/list', {'threadStartKind': 'all'})
+                    if not self._catalog(catalog):
+                        raise NativeToolError('native-app-tools-invalid-catalog')
+                except (OSError, TimeoutError, ValueError, KeyError, TypeError, DesktopControlError):
+                    self._resolved_endpoint = None
+                    continue
+                self._resolved_endpoint = (expected_identity, path)
+                if hasattr(pipe, 'deadline'):
+                    pipe.deadline = deadline
+                # No fallback may catch failures raised after this yield. The
+                # caller can already have dispatched a mutation on this pipe.
+                yield pipe, catalog
+                return
+        raise NativeToolError('native-app-tools-endpoint-unavailable')
 
     def _validate_server(self, pipe: Any, expected_identity: str) -> None:
         identity, _, image = self.identity_reader(pipe)
@@ -97,9 +155,8 @@ class NativeAppTools:
         return names
 
     def capabilities(self, expected_identity: str) -> set[str]:
-        with self.pipe_factory(timeout_seconds=5.0, path=self._path()) as pipe:
-            self._validate_server(pipe, expected_identity)
-            return self._catalog(self._rpc(pipe, 'tools/list', {'threadStartKind': 'all'}))
+        with self._connection(expected_identity, 5.0) as (_, catalog):
+            return self._catalog(catalog)
 
     def call(self, tool: str, arguments: dict, *, source_thread_id: str,
              expected_identity: str, operation_id: str, mutation: bool = False) -> dict:
@@ -114,9 +171,7 @@ class NativeAppTools:
             return {'state': 'rejected', 'reason': 'invalid-operation-id'}
         dispatched = False
         try:
-            with self.pipe_factory(timeout_seconds=10.0, path=self._path()) as pipe:
-                self._validate_server(pipe, expected_identity)
-                catalog = self._rpc(pipe, 'tools/list', {'threadStartKind': 'all'})
+            with self._connection(expected_identity, 10.0) as (pipe, catalog):
                 available = self._catalog(catalog)
                 if tool not in available:
                     return {'state': 'rejected', 'reason': 'native-tool-not-published'}
@@ -125,7 +180,7 @@ class NativeAppTools:
                 if not validate_arguments(arguments, row.get('inputSchema')):
                     return {'state': 'rejected', 'reason': 'native-tool-schema-incompatible'}
                 # Same server and same Desktop generation, including immediately
-                # before writing. A stale inherited endpoint is not auto-replaced.
+                # before writing. Endpoint recovery ends before tool dispatch.
                 self._validate_server(pipe, expected_identity)
                 dispatched = True
                 result = self._rpc(pipe, 'tools/call', {
