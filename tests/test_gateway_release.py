@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
@@ -49,6 +50,81 @@ class GatewayReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 package_gateway_release.package(binary, root / 'dist',
                                                 tag='v0.1.0', gateway_version='1.5.0-desktop-control.5')
+
+    def test_verified_gateway_is_reused_without_network(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / 'gateway.exe'
+            target.write_bytes(b'verified-fixture')
+            with patch.object(fetch_gateway, 'BINARY_SHA256', fetch_gateway._sha256(target)), \
+                    patch.object(fetch_gateway, '_download') as download:
+                self.assertTrue(fetch_gateway.ensure_gateway(target)['cached'])
+                download.assert_not_called()
+            with self.assertRaises(ValueError):
+                fetch_gateway.ensure_gateway(target)
+            self.assertEqual(target.read_bytes(), b'verified-fixture')
+
+    def fetch_fixture(self, target, binary=b'verified-fixture', *, before_publish=None, metadata_hash=None):
+        expected = hashlib.sha256(binary).hexdigest()
+
+        def download(url, destination):
+            if destination.suffix == '.zip':
+                info = {'release_tag': fetch_gateway.RELEASE_TAG,
+                        'gateway_version': fetch_gateway.RELEASE_TAG.removeprefix('v'),
+                        'upstream_revision': fetch_gateway.UPSTREAM_REVISION,
+                        'platform': 'windows-x64', 'binary_sha256': metadata_hash or expected}
+                with zipfile.ZipFile(destination, 'w') as bundle:
+                    bundle.writestr('cc-connect-desktop-control.exe', binary)
+                    bundle.writestr('BUILD_INFO.json', json.dumps(info))
+                    bundle.writestr('THIRD_PARTY_NOTICES.md', 'fixture')
+                    bundle.writestr('CC_CONNECT_ADAPTER.md', 'fixture')
+            else:
+                archive = destination.parent / fetch_gateway.ASSET_NAME
+                destination.write_text(fetch_gateway._sha256(archive) + '  ' + fetch_gateway.ASSET_NAME, encoding='utf-8')
+
+        publish = fetch_gateway._publish_no_replace
+
+        def publishing(staged, output):
+            if before_publish:
+                before_publish(output)
+            publish(staged, output)
+
+        with patch.object(fetch_gateway, '_download', side_effect=download), \
+                patch.object(fetch_gateway, 'BINARY_SHA256', expected), \
+                patch.object(fetch_gateway, '_publish_no_replace', side_effect=publishing):
+            return fetch_gateway.fetch(target=target)
+
+    def test_release_download_validates_binary_and_publishes_once(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / 'gateway.exe'
+            result = self.fetch_fixture(target)
+            self.assertFalse(result['cached'])
+            self.assertEqual(target.read_bytes(), b'verified-fixture')
+            self.assertFalse(target.with_suffix('.staged.exe').exists())
+
+    def test_download_does_not_replace_target_created_by_another_process(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / 'gateway.exe'
+            with self.assertRaises(FileExistsError):
+                self.fetch_fixture(target, before_publish=lambda path: path.write_bytes(b'other-install'))
+            self.assertEqual(target.read_bytes(), b'other-install')
+            self.assertFalse(target.with_suffix('.staged.exe').exists())
+
+    def test_download_does_not_delete_someone_elses_staging_file(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / 'gateway.exe'
+            staged = target.with_suffix('.staged.exe')
+            staged.write_bytes(b'other-installer')
+            with self.assertRaises(FileExistsError):
+                self.fetch_fixture(target)
+            self.assertEqual(staged.read_bytes(), b'other-installer')
+            self.assertFalse(target.exists())
+
+    def test_download_rejects_bad_binary_provenance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / 'gateway.exe'
+            with self.assertRaises(ValueError):
+                self.fetch_fixture(target, metadata_hash='f' * 64)
+            self.assertFalse(target.exists())
 
 
 if __name__ == '__main__':

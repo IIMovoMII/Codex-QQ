@@ -34,7 +34,7 @@ jobs:
           go-version: '1.25.x'
           cache: false
       - name: 核对基线、应用补丁并运行网关专项测试
-        run: python -X utf8 tools/prepare_gateway.py --source-build --version $env:GATEWAY_VERSION
+        run: python -X utf8 tools/ci_build_gateway.py --version $env:GATEWAY_VERSION
       - name: 打包网关、来源信息和校验文件
         shell: pwsh
         run: |
@@ -56,7 +56,7 @@ jobs:
 
           - 仅包含本项目适配的 ACP 与 QQ 通道。
           - 来源、上游固定提交、补丁说明和二进制 SHA-256 在压缩包内。
-          - 运行时不需要 Go；源码重建仍见仓库开发说明。
+          - 安装请运行仓库内的 install.cmd；无需 Go 或源码构建。
           - 这是 Codex-QQ 的配套组件，不是未打补丁的上游 cc-connect.exe。
           "@
           Set-Content -Path dist/RELEASE_NOTES.md -Value $notes -Encoding utf8

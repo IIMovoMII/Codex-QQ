@@ -74,31 +74,27 @@
 阅读 https://github.com/IIMovoMII/Codex-QQ ，按照智能体安装指南在我的电脑上部署 Codex-QQ。
 ~~~
 
-智能体会按[安装指南](docs/agent-install.md)检查环境、下载源码、构建和配置应用。需要你操作时，再引导你创建机器人、在本机填写密钥、绑定本人 QQ 和确认钩子信任；不需要先学会这些命令。没有本机操作能力的网页聊天只能提供指导。
+智能体会按[安装指南](docs/agent-install.md)检查环境、准备程序，并打开一个安装向导。你只需跟着提示创建机器人、在本机填写密钥、绑定 QQ 和确认钩子信任。中断后重新运行向导即可接着做，不用从头配置。没有本机操作能力的网页聊天只能提供指导。
 
 ### 手动安装
 
-当前支持 **Windows 10/11**。安装脚本会从本仓库的 GitHub Releases 下载经过 Actions 构建、带来源信息和 SHA-256 校验的 CC Connect 配套网关；普通使用不需要用户安装 Go，也不需要自己从零编译 CC Connect。仍需要自己的 QQ 官方机器人、可用的 Codex Desktop、Python 3.11+ 和 Git。Python 侧不用安装第三方包。
+当前支持 **Windows 10/11 x64**，需要可用的 Codex Desktop、Python 3.11+ 和自己的 QQ 官方机器人。**不需要 Go、pip 包或自己编译 CC Connect**；安装向导自动下载并校验本仓库发布的配套网关。
 
 ~~~powershell
 git clone https://github.com/IIMovoMII/Codex-QQ.git
 cd Codex-QQ
-# 默认下载并校验本仓库发布的 CC Connect 适配网关，不调用 Go
-py -3 -X utf8 tools/prepare_gateway.py
-py -3 -X utf8 tools/build_resident_app.py
+.\install.cmd
 ~~~
 
-`prepare_gateway.py` 使用的是本项目的 CC Connect 适配版，不是随便下载的上游 `cc-connect.exe`。发布包中包含固定上游提交、适配版本、补丁说明和校验信息。
+没有 Git？用仓库顶部的 **Code → Download ZIP**，解压到长期保留的文件夹，双击 `install.cmd` 即可。
 
-然后按[首次安装指南](docs/install.md)完成三件事：
+向导会自动准备程序、启动配置连接，再提示你完成：
 
 1. 配置自己的机器人，并在 QQ 私聊中绑定自己的身份。
-2. 打开 `bin/CodexQQ助手.exe`，再合并本程序的 Codex 钩子，在 Desktop 核对并信任。
+2. 确认合并本程序钩子，再到 Desktop 核对并信任。
 3. 向机器人发「帮助」，检查选定对话、发送任务和结果提醒。
 
-首次配置工具不会覆盖已有安装，不会替你改模型、登录态或历史。自启由托盘菜单手动开启。
-
-网络受限或需要自己审查构建过程时，开发者可以按[开发说明](docs/development.md#重新构建与更新)使用固定 CC Connect 源码和 Go 1.25+ 重建；这不是普通用户的必需步骤。
+已有绑定会保留，不会替你改模型、登录态或历史。以后双击 `bin/CodexQQ助手.exe` 开启，托盘右键退出或按需开启登录自启。详见[首次安装](docs/install.md)与[更新说明](docs/development.md#更新已有安装)。
 
 ### 第一次发任务
 

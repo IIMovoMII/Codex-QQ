@@ -20,7 +20,7 @@ def pairing_reply(params: dict, session: str) -> str:
     if not isinstance(meta.get('text'), str) or meta['text'].strip() != '绑定':
         return '👋 这是首次配置模式。发送“绑定”查看自己的 OpenID；这里不能操作 Codex。'
     return ('🔗 你的 QQ OpenID：\n' + user + '\n\n'
-            '回到电脑停止配置网关，再运行 configure.py --bind，填入这串编号。\n'
+            '回到电脑的安装向导，填入这串编号并确认绑定。\n'
             '这不是 QQ 号；当前没有连接或操作 Codex。')
 
 

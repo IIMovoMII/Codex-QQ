@@ -100,22 +100,29 @@ def prepare(root: Path, runtime: Path, cc_data: Path, app_id: str, secret: str, 
     return config
 
 
+def load_pending(root: Path, runtime: Path) -> tuple[dict, dict]:
+    """Validate a resumable setup before allowing its identity-only gateway."""
+    state = json.loads((runtime / 'setup-pending.json').read_text(encoding='utf-8'))
+    config = runtime / 'cc-connect.toml'
+    if (not isinstance(state, dict) or state.get('version') != 1 or state.get('root') != str(root.resolve())
+            or state.get('config_sha256') != hashlib.sha256(config.read_bytes()).hexdigest()):
+        raise ValueError('首次配置文件已变化，拒绝自动替换。')
+    parsed = tomllib.loads(config.read_text(encoding='utf-8'))
+    return state, parsed
+
+
 def bind(root: Path, runtime: Path, openid: str) -> None:
     if not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', openid) or openid.isdecimal():
         raise ValueError('请填机器人返回的 OpenID，不是普通 QQ 号。')
     if (runtime / 'settings.json').exists():
         raise ValueError('已有正式配置，拒绝覆盖。')
+    state, parsed = load_pending(root, runtime)
     pending = runtime / 'setup-pending.json'
-    state = json.loads(pending.read_text(encoding='utf-8'))
     config = runtime / 'cc-connect.toml'
-    if (state.get('version') != 1 or state.get('root') != str(root.resolve())
-            or state.get('config_sha256') != hashlib.sha256(config.read_bytes()).hexdigest()):
-        raise ValueError('首次配置文件已变化，拒绝自动替换。')
-    parsed = tomllib.loads(config.read_text(encoding='utf-8'))
     opts = parsed['projects'][0]['platforms'][0]['options']
     executable = root / 'vendor/cc-connect/v1.5.0-desktop-control/bin/cc-connect-desktop-control.exe'
     if not executable.is_file():
-        raise ValueError('请先按安装文档构建 CC Connect 适配版。')
+        raise ValueError('请先运行 install.cmd 下载配套 CC Connect 网关。')
     # User stops the foreground pairing gateway before this step. The native
     # app later owns the production process; no forced kills during setup.
     cc_data = Path(state['cc_data'])

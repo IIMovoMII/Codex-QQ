@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import urllib.request
@@ -15,6 +16,9 @@ RELEASE_TAG = 'v1.5.0-desktop-control.5'
 ASSET_NAME = f'codex-qq-gateway-windows-x64-{RELEASE_TAG}.zip'
 CHECKSUM_NAME = 'SHA256SUMS.txt'
 UPSTREAM_REVISION = '17c61062c2f9ce9bcdd45a2082e491f9743a2770'
+# The immutable, already-published .5 binary. A future release must explicitly
+# update this pin; the downloaded checksum is not its own trust anchor.
+BINARY_SHA256 = '05c7db95eb3454686e1d2833a109e29d030146e610263e40cfd2809ca5389297'
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 
 
@@ -53,6 +57,32 @@ def _expected_checksum(text: str, asset_name: str) -> str:
     return matches[0]
 
 
+def _result(target: Path, *, cached: bool) -> dict:
+    return {'target': str(target), 'release_tag': RELEASE_TAG,
+            'gateway_version': RELEASE_TAG.removeprefix('v'),
+            'upstream_revision': UPSTREAM_REVISION, 'sha256': _sha256(target), 'cached': cached}
+
+
+def ensure_gateway(target: Path) -> dict:
+    """Idempotent first install; an unknown/older binary is never replaced."""
+    target = target.resolve()
+    if target.exists():
+        if not target.is_file() or _sha256(target) != BINARY_SHA256:
+            raise ValueError('已有其他版本的网关，未覆盖。请按 docs/development.md 更新，原配置和绑定无需重做。')
+        return _result(target, cached=True)
+    return fetch(target=target)
+
+
+def _publish_no_replace(staged: Path, target: Path) -> None:
+    # Windows rename refuses an existing destination. POSIX rename would replace
+    # it, so use an exclusive hard link there (both files are in one directory).
+    if os.name == 'nt':
+        staged.rename(target)
+    else:
+        os.link(staged, target)
+        staged.unlink()
+
+
 def fetch(*, target: Path, tag: str = RELEASE_TAG, repository: str = REPOSITORY) -> dict:
     if target.exists():
         raise ValueError('网关目标已存在，未覆盖；如需更新请先退出助手并按更新流程操作')
@@ -72,29 +102,34 @@ def fetch(*, target: Path, tag: str = RELEASE_TAG, repository: str = REPOSITORY)
         if actual != expected:
             raise ValueError('网关发布包校验失败，未写入本机')
         with zipfile.ZipFile(archive) as bundle:
-            names = set(bundle.namelist())
+            members = bundle.namelist()
+            names = set(members)
             required = {'cc-connect-desktop-control.exe', 'BUILD_INFO.json',
                         'THIRD_PARTY_NOTICES.md', 'CC_CONNECT_ADAPTER.md'}
-            if names != required:
+            if names != required or len(members) != len(required):
                 raise ValueError('网关发布包内容不符合预期，未写入本机')
             info = json.loads(bundle.read('BUILD_INFO.json').decode('utf-8'))
             if (info.get('release_tag') != tag or info.get('upstream_revision') != UPSTREAM_REVISION
+                    or info.get('gateway_version') != tag.removeprefix('v')
                     or info.get('platform') != 'windows-x64'):
                 raise ValueError('网关发布包来源信息不匹配，未写入本机')
             binary = bundle.read('cc-connect-desktop-control.exe')
-            if hashlib.sha256(binary).hexdigest() != info.get('binary_sha256'):
+            binary_hash = hashlib.sha256(binary).hexdigest()
+            if binary_hash != info.get('binary_sha256') or binary_hash != BINARY_SHA256:
                 raise ValueError('网关二进制校验失败，未写入本机')
             staged = target.with_suffix('.staged.exe')
-            if staged.exists():
-                raise ValueError('已有未完成的候选网关，未覆盖')
-            staged.write_bytes(binary)
+            created = False
             try:
-                staged.replace(target)
-            except Exception:
-                staged.unlink(missing_ok=True)
-                raise
-    return {'target': str(target), 'release_tag': tag, 'gateway_version': info['gateway_version'],
-            'upstream_revision': info['upstream_revision'], 'sha256': _sha256(target)}
+                with staged.open('xb') as stream:
+                    created = True
+                    stream.write(binary)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                _publish_no_replace(staged, target)
+            finally:
+                if created:
+                    staged.unlink(missing_ok=True)
+    return _result(target, cached=False)
 
 
 def main() -> int:
