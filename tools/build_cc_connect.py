@@ -59,7 +59,7 @@ def main() -> None:
     parser.add_argument('--check-binary', type=Path)
     parser.add_argument('--source', type=Path)
     parser.add_argument('--output', type=Path)
-    parser.add_argument('--version', default='1.5.0-desktop-control.4')
+    parser.add_argument('--version', default='1.5.0-desktop-control.5')
     args = parser.parse_args()
     if args.check_binary:
         verify_binary_metadata(run(args.go, ['version', '-m', str(args.check_binary)]))

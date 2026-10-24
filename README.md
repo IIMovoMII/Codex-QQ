@@ -10,6 +10,7 @@
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4)](docs/install.md)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](docs/install.md)
 [![检查](https://github.com/IIMovoMII/Codex-QQ/actions/workflows/check.yml/badge.svg)](https://github.com/IIMovoMII/Codex-QQ/actions/workflows/check.yml)
+[![配套网关](https://img.shields.io/github/v/release/IIMovoMII/Codex-QQ?label=配套网关)](https://github.com/IIMovoMII/Codex-QQ/releases)
 [![MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 [一句话安装](#一句话安装) · [操作手册](docs/usage.md) · [常见问题](docs/troubleshooting.md) · [参与开发](docs/development.md)
@@ -77,14 +78,17 @@
 
 ### 手动安装
 
-当前发布的是 **Windows 源码版**，不是双击即用的通用安装器。需要自己的 QQ 官方机器人、可用的 Codex Desktop，以及 Python 3.11+。首次构建还需要 Git 和 Go 1.25+；Python 侧不用安装第三方包。
+当前支持 **Windows 10/11**。安装脚本会从本仓库的 GitHub Releases 下载经过 Actions 构建、带来源信息和 SHA-256 校验的 CC Connect 配套网关；普通使用不需要用户安装 Go，也不需要自己从零编译 CC Connect。仍需要自己的 QQ 官方机器人、可用的 Codex Desktop、Python 3.11+ 和 Git。Python 侧不用安装第三方包。
 
 ~~~powershell
 git clone https://github.com/IIMovoMII/Codex-QQ.git
 cd Codex-QQ
+# 默认下载并校验本仓库发布的 CC Connect 适配网关，不调用 Go
 py -3 -X utf8 tools/prepare_gateway.py
 py -3 -X utf8 tools/build_resident_app.py
 ~~~
+
+`prepare_gateway.py` 使用的是本项目的 CC Connect 适配版，不是随便下载的上游 `cc-connect.exe`。发布包中包含固定上游提交、适配版本、补丁说明和校验信息。
 
 然后按[首次安装指南](docs/install.md)完成三件事：
 
@@ -93,6 +97,8 @@ py -3 -X utf8 tools/build_resident_app.py
 3. 向机器人发「帮助」，检查选定对话、发送任务和结果提醒。
 
 首次配置工具不会覆盖已有安装，不会替你改模型、登录态或历史。自启由托盘菜单手动开启。
+
+网络受限或需要自己审查构建过程时，开发者可以按[开发说明](docs/development.md#重新构建与更新)使用固定 CC Connect 源码和 Go 1.25+ 重建；这不是普通用户的必需步骤。
 
 ### 第一次发任务
 

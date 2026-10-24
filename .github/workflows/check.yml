@@ -45,4 +45,22 @@ jobs:
           go-version: '1.25.x'
           cache: false
       - name: 核对基线、应用补丁、仅构建 ACP 和 QQ
-        run: python -X utf8 tools/prepare_gateway.py
+        run: python -X utf8 tools/prepare_gateway.py --source-build --version 1.5.0-desktop-control.5
+      - name: 打包构建产物并检查来源信息
+        shell: pwsh
+        run: |
+          python -X utf8 tools/package_gateway_release.py `
+            --binary vendor/cc-connect/v1.5.0-desktop-control/bin/cc-connect-desktop-control.exe `
+            --output-dir dist `
+            --release-tag v1.5.0-desktop-control.5 `
+            --gateway-version 1.5.0-desktop-control.5
+          if (-not (Test-Path dist/SHA256SUMS.txt)) { throw '未生成发布校验文件' }
+      - name: 上传可复核的网关构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-qq-gateway-windows-x64-${{ github.sha }}
+          path: |
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14

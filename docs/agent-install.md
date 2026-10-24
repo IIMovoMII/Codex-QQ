@@ -16,7 +16,7 @@
 
 - 操作系统、当前用户、是否有可用的 Windows 桌面/Explorer。不要用管理员账户代替实际使用账户安装。
 - Codex Desktop 是否安装、实际进程和 `CODEX_HOME`；配置能否解析、现有钩子与当前采用的命令解释器。仅读取需要的字段，不输出认证、完整配置或历史正文。
-- Python 3.11+、对应的 `pythonw.exe`、Git、Go 1.25+、Windows .NET Framework 编译器是否可用。当前自动测试覆盖 Python 3.11 和 3.13；Python 运行部分无第三方包。
+- Python 3.11+、对应的 `pythonw.exe`、Git、Windows .NET Framework 编译器是否可用。普通安装不需要 Go：`prepare_gateway.py` 会下载并校验本仓库发布的 CC Connect 适配网关。只有用户明确选择源码重建或发布包不可用时才检查 Go 1.25+。当前自动测试覆盖 Python 3.11 和 3.13；Python 运行部分无第三方包。
 - 是否已有 Codex-QQ 源码、助手/网关进程、运行配置、绑定和自启项，路径是否一致。
 - 当前版本的安装、构建参数；不要猜测未提供的安装命令。
 
@@ -48,9 +48,9 @@ py -3 -X utf8 -m unittest discover -s tests -q
 py -3 -X utf8 tools/check_publication.py
 ```
 
-确认产生配套网关、`bin/CodexQQ助手.exe` 和本机 `bin/app-runtime.json`。启动入口依赖源码目录和构建时选定的 Python，不是可随意移动的单文件应用。下载 ZIP 而非 Git 副本时，公开文件检查需要 Git 索引；不能伪称该检查通过。
+`prepare_gateway.py` 默认下载配套网关，不要求用户从零构建 Go 环境；确认产生配套网关、`bin/CodexQQ助手.exe` 和本机 `bin/app-runtime.json`。启动入口依赖源码目录和本机 Python，不是可随意移动的单文件应用。下载 ZIP 而非 Git 副本时，公开文件检查需要 Git 索引；不能伪称该检查通过。若下载失败，先把具体网络/校验错误告诉用户，再由用户选择官方 Go 源码重建，不要静默切换到未核实的上游二进制。
 
-网关必须使用本仓库的固定上游基线和配套补丁，不换成任意最新版 `cc-connect.exe`。**固定构建依赖不等于固定 Codex 安装版本**；后者仍按实际接口能力判断。
+网关必须使用本仓库发布的固定上游基线和配套补丁，不换成任意最新版 `cc-connect.exe`。**固定构建依赖不等于固定 Codex 安装版本**；后者仍按实际接口能力判断。
 
 构建中断时先检查报错和残留。`prepare_gateway.py` 拒绝覆盖已有构建目录/程序是保护，不是需要删除整个项目的理由。仅在确认属于本次失败构建且不被运行实例引用后清理具体残留，或按开发说明在独立构建目录生成候选文件。更新运行中的网关前只退出助手，不终止 Codex。
 

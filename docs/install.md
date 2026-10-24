@@ -7,7 +7,7 @@
 - Windows 10/11 x64，使用自己的普通登录用户，不需要管理员权限。当前主要在 Windows 11 验证。
 - 已安装、已登录且能够正常对话的 Codex Desktop，至少有一个本地对话。官方账号和第三方 API 均可。
 - [Python 3.11 或更新版本](https://www.python.org/downloads/windows/)，包含 `py` 启动器和 `pythonw.exe`。测试矩阵为 3.11、3.13。
-- [Git](https://git-scm.com/downloads/win) 和 [Go 1.25 或更新版本](https://go.dev/dl/)，仅首次构建网关需要。
+- [Git](https://git-scm.com/downloads/win)。普通安装会下载 GitHub Releases 中的配套网关，不需要 Go；只有网络受限、需要审查源码或开发适配补丁时，才按[开发说明](development.md#重新构建与更新)安装 [Go 1.25 或更新版本](https://go.dev/dl/)。
 - Windows 自带 .NET Framework 编译器，用于生成小型托盘启动入口。缺失时工具会说明，不自动下载安装其他程序。
 - 自己的 QQ 官方机器人 AppID 和 AppSecret。到 [QQ 开放平台](https://q.qq.com/) 创建机器人，资格、私聊权限、测试成员和上线要求以平台当时规则为准。[CC Connect 的 QQ 接入说明](https://github.com/chenhg5/cc-connect/blob/v1.5.0/docs/qqbot.md)可辅助参考。
 
@@ -24,7 +24,7 @@ py -3 -X utf8 tools/prepare_gateway.py
 py -3 -X utf8 tools/build_resident_app.py
 ```
 
-网关构建获取固定的 CC Connect 源码、验证提交、应用配套补丁，再只编译 ACP 和 QQ 通道。首次下载 Go 依赖可能较慢；构建时的 CPU 占用不代表应用待机占用。
+`prepare_gateway.py` 默认从本项目 GitHub Releases 下载并校验已经构建好的 CC Connect 适配版，运行时不需要 Go。网关发布包来自固定的 CC Connect 提交，应用了本仓库的三份补丁，只保留 ACP 和 QQ 通道；包内有来源信息、补丁说明和 SHA-256。首次下载只会写入不存在的目标，不会覆盖正在使用的程序。
 
 生成的 `bin/CodexQQ助手.exe` 仍依赖当前目录的源码和本机 Python，**不是可复制到另一台电脑的单文件程序**。安装后不要随意搬动目录或删除 Python。更新和路径迁移见[开发说明](development.md)。
 

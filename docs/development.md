@@ -57,15 +57,29 @@ Windows 原生测试中有隔离进程、托盘和注册表场景；不要把测
 
 构建只保留 ACP 和 QQ，明确排除其他 Agent；必须检查依赖及二进制编译标记，不能只看 `--version`。基线及第三方许可见[声明](../THIRD_PARTY_NOTICES.md)。不固定 Codex 安装版本与固定第三方构建依赖是两回事。
 
+普通用户不需要自己准备 Go：`tools/prepare_gateway.py` 默认下载本项目 GitHub Releases 的 Windows x64 配套网关，校验发布包 SHA-256 和 `BUILD_INFO.json` 中的固定上游提交后，才写入不存在的目标。发布包还附带第三方声明和适配说明；因此 GitHub 并不是“不用 CC Connect”，而是把已经验证过的 CC Connect 适配版作为运行依赖交付。
+
 ### 重新构建与更新
 
 首次构建脚本不会覆盖已有文件。已有安装更新网关时：
 
 1. 退出 QQ 助手，保留现用程序和运行数据；不要关闭或改写 Codex。
-2. 在新的临时目录取得固定基线，顺序应用补丁；可参考 `tools/prepare_gateway.py`，不要直接重新使用已打过补丁的源码。
+2. 在新的临时目录取得固定基线，顺序应用补丁；可参考 `tools/prepare_gateway.py --source-build`，不要直接重新使用已打过补丁的源码。
 3. 用 `tools/build_cc_connect.py --go <go.exe> --source <源码目录> --output <新的.staged.exe>` 生成候选文件，输出路径必须尚不存在。
 4. 检查编译标签、测试和候选版本；验证后再替换项目中的网关文件，保留一份可恢复的前版即可。
 5. 启动助手，检查 doctor、本地队列、QQ 入站和聊天正文实收。不能用退出码成功替代手机验收。
+
+源码构建并打包发布时：
+
+```powershell
+py -3 -X utf8 tools/prepare_gateway.py --source-build --version 1.5.0-desktop-control.5
+py -3 -X utf8 tools/package_gateway_release.py `
+  --binary vendor/cc-connect/v1.5.0-desktop-control/bin/cc-connect-desktop-control.exe `
+  --output-dir dist --release-tag v1.5.0-desktop-control.5 `
+  --gateway-version 1.5.0-desktop-control.5
+```
+
+源码版首次构建需要 Go，运行已构建的应用不需要 Go。发布工作流只允许在 GitHub Actions 通过网关专项测试后创建新 Release；不要把本机运行目录、配置、密钥或未核实的 exe 手工上传。
 
 只改 Python 源码通常只需退出助手、更新并测试、重新启动；不用重装钩子。修改入口路径/Python 位置后须重新构建启动入口，更新应用配置的绝对路径，重新安装并信任变化的钩子。不要运行首次配置来覆盖现有绑定。
 
