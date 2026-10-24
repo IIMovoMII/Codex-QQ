@@ -35,7 +35,10 @@ class InstallerTests(unittest.TestCase):
             )
             result = subprocess.run(
                 ["powershell.exe", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", build_hook_command(probe)],
-                capture_output=True, encoding="utf-8", timeout=5,
+                # A clean GitHub Windows runner can spend several seconds
+                # starting PowerShell before the tiny probe runs. This is a
+                # process-start budget, not a hook execution retry.
+                capture_output=True, encoding="utf-8", timeout=15,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout), [str(probe.resolve()), "hook"])
