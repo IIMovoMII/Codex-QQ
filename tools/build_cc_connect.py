@@ -44,6 +44,15 @@ def run(go: str, args: list[str], source: Path | None = None) -> str:
     return result.stdout
 
 
+def run_checked(go: str, args: list[str], source: Path | None = None) -> str:
+    """Run a check while preserving captured diagnostics in CI failures."""
+    try:
+        return run(go, args, source)
+    except subprocess.CalledProcessError as error:
+        detail = '\n'.join(x for x in (error.stdout, error.stderr) if x)
+        raise RuntimeError('命令失败：' + ' '.join(args) + '\n' + detail[-12000:]) from error
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description='仅构建，不安装，不发送 QQ 消息')
     parser.add_argument('--go', required=True)
@@ -64,7 +73,7 @@ def main() -> None:
     tags = build_tags(args.source)
     joined = ','.join(tags)
     verify_dependencies(run(args.go, ['list', '-deps', '-tags', joined, './cmd/cc-connect'], args.source))
-    run(args.go, ['test', './agent/acp', './core', './platform/qqbot'], args.source)
+    run_checked(args.go, ['test', './agent/acp', './core', './platform/qqbot'], args.source)
     target.parent.mkdir(parents=True, exist_ok=True)
     run(args.go, ['build', '-trimpath', '-tags', joined, '-ldflags', f'-s -w -X main.version={args.version}',
                   '-o', str(target), './cmd/cc-connect'], args.source)
