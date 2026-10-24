@@ -74,14 +74,14 @@ class MessageSubmissionTests(unittest.TestCase):
         for key in ('sandboxPolicy', 'approvalPolicy', 'permissions', 'collaborationMode', 'serviceTier', 'expectedTurnId'):
             self.assertNotIn(key, request)
 
-    def test_active_or_initializing_never_starts_or_steers_and_queues_once(self):
+    def test_active_message_is_not_hidden_in_background_queue(self):
         for turn, runtime in (({'turnId': TURN, 'status': 'inProgress'}, {'type': 'active'}),
                               ({'turnId': None, 'status': 'inProgress'}, {'type': 'active'})):
             self.state['turn'], self.state['runtime'] = turn, runtime
             result = self.send()
-            self.assertEqual(result['mode'], 'queued')
-            self.assertEqual(result['detail'], 'queue acknowledgement')
-        self.assertEqual(self.queue.call_count, 2)
+            self.assertEqual(result['state'], 'rejected')
+            self.assertIn('未发送、未排队', result['reply'])
+        self.queue.assert_not_called()
         self.assertEqual(self.starts(), [])
 
     def test_pending_unknown_unloaded_and_unresolved_idle_never_submits(self):
@@ -111,12 +111,14 @@ class MessageSubmissionTests(unittest.TestCase):
         self.queue.assert_not_called()
         self.assertEqual(self.starts(), [])
 
-    def test_task_changes_to_active_before_idle_start_reclassifies_as_queue(self):
+    def test_task_changes_to_active_before_idle_start_fails_closed(self):
         idle = copy.deepcopy(self.state)
         active = {**idle, 'turn': {'turnId': 'new-active', 'status': 'inProgress'}, 'runtime': {'type': 'active'}}
         self.backend.snapshot = Mock(side_effect=[idle, active])
-        self.assertEqual(self.send()['mode'], 'queued')
-        self.queue.assert_called_once()
+        result = self.send()
+        self.assertEqual(result['state'], 'rejected')
+        self.assertIn('未发送、未排队', result['reply'])
+        self.queue.assert_not_called()
         self.assertEqual(self.starts(), [])
 
     def test_lost_start_response_never_falls_back_to_queue_or_steer(self):
@@ -149,13 +151,13 @@ class MessageSubmissionTests(unittest.TestCase):
         self.assertEqual(self.pipe.writes, [])
         self.queue.assert_not_called()
 
-    def test_queue_loss_remains_unknown_and_native_start_is_not_fallback(self):
+    def test_busy_message_never_dispatches_to_background_queue(self):
         self.state['turn']['status'] = 'inProgress'
         self.state['runtime'] = {'type': 'active'}
         self.queue.return_value = (False, 'codex queue 超时。')
-        self.assertEqual(self.send()['state'], 'unknown')
+        self.assertEqual(self.send()['state'], 'rejected')
         self.assertEqual(self.starts(), [])
-        self.queue.assert_called_once()
+        self.queue.assert_not_called()
 
 
 if __name__ == '__main__':

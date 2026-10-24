@@ -64,6 +64,7 @@ def main() -> None:
     tags = build_tags(args.source)
     joined = ','.join(tags)
     verify_dependencies(run(args.go, ['list', '-deps', '-tags', joined, './cmd/cc-connect'], args.source))
+    run(args.go, ['test', './agent/acp', './core', './platform/qqbot'], args.source)
     target.parent.mkdir(parents=True, exist_ok=True)
     run(args.go, ['build', '-trimpath', '-tags', joined, '-ldflags', f'-s -w -X main.version={args.version}',
                   '-o', str(target), './cmd/cc-connect'], args.source)

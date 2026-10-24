@@ -98,6 +98,17 @@
  	if !s.alive.Load() {
  		return fmt.Errorf("acp: session closed")
  	}
+@@ -612,7 +616,10 @@
+ 	params := map[string]any{
+ 		"sessionId": sid,
+ 		"prompt":    promptBlocks,
+ 	}
++	if metadata != nil {
++		params["_meta"] = map[string]any{"cc_connect": metadata}
++	}
+ 
+ 	slog.Debug("acp: sending session/prompt", "session_id", sid, "prompt_len", len(prompt))
+ 	res, err := s.tr.call(s.ctx, "session/prompt", params)
 --- a/platform/qqbot/qqbot.go
 +++ b/platform/qqbot/qqbot.go
 @@ -86,6 +86,7 @@

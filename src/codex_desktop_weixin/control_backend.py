@@ -229,10 +229,11 @@ class NativeBackend:
 
     def submit_message(self, thread_id: str, text: str, connection: str,
                        operation_id: str, queue_func: Any) -> dict:
-        """Normal QQ text: queue busy work, start an idle/paused native turn.
+        """Normal QQ text: start an idle/paused native turn.
 
-        There is one dispatch only. A lost start confirmation never becomes a
-        second submission via the queue or steer. Existing queued work is kept.
+        Busy work is rejected until the same Desktop exposes an atomic visible
+        queue append. A lost start confirmation never becomes a second
+        submission via another path. Existing queued work is kept.
         """
         try:
             text.encode('utf-8', errors='strict')
@@ -261,19 +262,14 @@ class NativeBackend:
         if route == 'unavailable':
             return {'state': 'rejected', 'reply': '原生状态尚未就绪或上次提交未确认，未发送新消息、未排队。请先在电脑核对。'}
         if route == 'queued':
-            # Match the same Desktop generation and owner before launching the
-            # existing queue command. It never acts as a fallback after start.
-            self.ensure_owner(thread_id)
-            if self.probe()[0] != connection:
-                return {'state': 'rejected', 'reply': 'Codex 连接已变化，未发送；请恢复后重新发。'}
-            try:
-                ok, detail = queue_func(thread_id, text)
-            except (OSError, TimeoutError):
-                return {'state': 'unknown', 'reply': '排队请求未取得确认，可能已经受理；不会再次提交，请查看电脑。'}
-            return {'state': 'confirmed', 'mode': 'queued', 'detail': detail} if ok else {
-                'state': 'unknown' if '超时' in detail else 'rejected',
-                'reply': '指令已发出，但没有收到确认，可能已经执行。不会自动重发，请先查看目标对话。'
-                         if '超时' in detail else '未能提交：' + detail}
+            # `codex queue` targets the app-server queue, which this Desktop
+            # build does not expose as the same visible composer queue. The
+            # published send-message tool is an immediate send/steer path, and
+            # the follower queue-state IPC replaces a whole snapshot rather
+            # than atomically appending. Do not silently enqueue elsewhere.
+            return {'state': 'rejected', 'reply':
+                    '这条对话正在运行，但目前没有可安全加入 Desktop 可见待发送列表的接口；本条未发送、未排队。'
+                    '如需立即补充，请明确发送“引导 正文”；否则等当前任务结束后再发送。'}
         if (before.get('mode') not in (None, 'default')
                 or before.get('thread_start_kind') not in (None, 'default')
                 or not isinstance(before.get('cwd'), str) or not before['cwd']):

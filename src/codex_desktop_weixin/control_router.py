@@ -381,8 +381,8 @@ class ControlRouter:
             payload.encode("utf-8", errors="strict")
         except UnicodeEncodeError:
             return "消息包含损坏字符，未发送，请重新输入原文。", "rejected"
-        # Match the actual composer path: idle/paused starts a new native turn;
-        # busy queues. Never fall back after an uncertain native start.
+        # Match the safe current path: idle/paused starts a new native turn;
+        # busy fails closed until a visible atomic queue append is available.
         result = self.backend.submit_message(thread_id, payload, meta['_desktop_identity'],
                                              str(uuid.uuid4()), self.queue_func)
         if result['state'] != 'confirmed':
@@ -390,10 +390,9 @@ class ControlRouter:
         if result['mode'] == 'started':
             return self._card(scope, 'thread', {'thread_id': thread_id},
                               f"💬 {self.catalog.label(row)}\n\n已进入对话，这条新消息没有排队。\n沿用本对话的模型、思考档位和权限，完成或出错后再提醒你。\n以前的排队消息仍保留。"), 'confirmed'
-        detail = result['detail']
         if result['mode'] == 'queued':
             from submission_receipts import queue_ack, digest, status_text
-            queue_id = queue_ack(detail, thread_id)
+            queue_id = queue_ack(result['detail'], thread_id)
             if queue_id:
                 receipt = {'thread_id': thread_id, 'queue_id': queue_id,
                            'text_digest': digest(payload), 'client_id': None,
