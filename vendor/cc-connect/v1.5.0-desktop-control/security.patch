@@ -121,7 +121,7 @@ new file mode 100644
 index 0000000..9ee65db
 --- /dev/null
 +++ b/platform/qqbot/permission_token_test.go
-@@ -0,0 +1,86 @@
+@@ -0,0 +1,102 @@
 +package qqbot
 +
 +import (
@@ -409,7 +409,7 @@ index 890eb2d..af3a2ee 100644
  	}
  
  	slog.Debug("qqbot: forwarding button click as permission response",
-@@ -1149,6 +1202,50 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
+@@ -1149,6 +1202,59 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
  	p.handler(p, msg)
  }
  
