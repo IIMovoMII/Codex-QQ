@@ -14,7 +14,6 @@ import os
 from pathlib import Path
 import platform
 import re
-import subprocess
 import time
 import tomllib
 
@@ -24,6 +23,8 @@ import configure
 from fetch_gateway import BINARY_SHA256, RELEASE_TAG, ensure_gateway
 from installer import build_hook_command, hooks_feature_enabled, install_hooks, merge_hooks_document
 from runtime_io import acquire_file_lock, default_data_dir
+from setup_process import PairingGateway, wait_gateway_ready
+from setup_diagnostics import InstallFailure, record_failure, run_logged
 
 GATEWAY_RELATIVE = Path('vendor/cc-connect/v1.5.0-desktop-control/bin/cc-connect-desktop-control.exe')
 
@@ -38,6 +39,8 @@ def setup_state(root: Path, runtime: Path) -> str:
     pending = runtime / 'setup-pending.json'
     if settings.exists():
         if pending.exists():
+            if configure.pending_phase(root, runtime) == 'binding':
+                return 'finalizing'
             raise ValueError('正式配置与未完成绑定同时存在，请检查原安装；未清空或覆盖任何配置。')
         state = json.loads(settings.read_text(encoding='utf-8-sig'))
         if (not isinstance(state, dict) or state.get('mode') != 'cc-connect'
@@ -46,8 +49,8 @@ def setup_state(root: Path, runtime: Path) -> str:
             raise ValueError('已有安装的路径或模式与当前目录不同，请按更新说明接续原安装，不要重复绑定。')
         return 'configured'
     if pending.exists():
-        configure.load_pending(root, runtime)
-        return 'pairing'
+        phase = configure.pending_phase(root, runtime)
+        return {'preparing': 'preparing', 'binding': 'finalizing', 'pairing': 'pairing'}[phase]
     if (runtime / 'cc-connect.toml').exists():
         raise ValueError('发现没有进度记录的配置，已保留；请先核实它属于哪次安装。')
     return 'new'
@@ -94,18 +97,29 @@ def check(root: Path, runtime: Path, codex_home: Path) -> dict:
             'next': 'install.cmd' if state != 'conflict' else '检查现有安装，不要清空配置'}
 
 
-def prepare_files(root: Path) -> None:
+def prepare_files(root: Path, logs: Path | None = None) -> None:
+    logs = logs or default_data_dir() / 'logs'
     print('正在准备配套 QQ 网关（已校验的文件会直接复用）……', flush=True)
-    result = ensure_gateway(root / GATEWAY_RELATIVE)
+    try:
+        result = ensure_gateway(root / GATEWAY_RELATIVE)
+    except Exception as error:
+        stage = getattr(error, 'stage', 'QQ 网关产物验证' if isinstance(error, ValueError) else 'QQ 网关准备')
+        raise record_failure(logs, stage, error) from None
     print('QQ 网关：' + ('已复用' if result['cached'] else '已下载并通过校验'))
     if not launcher_ready(root):
-        subprocess.run([sys.executable, '-X', 'utf8', str(root / 'tools/build_resident_app.py')],
-                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        run_logged([sys.executable, '-X', 'utf8', str(root / 'tools/build_resident_app.py')],
+                   stage='启动器编译与发布', logs=logs)
+        if not launcher_ready(root):
+            raise record_failure(logs, '启动器产物验证', ValueError('子进程成功退出，但启动入口及构建记录未通过校验。'))
     print('应用启动入口：已就绪')
 
 
 def pair(root: Path, runtime: Path, *, ask=input, hidden=getpass.getpass) -> bool:
     state = setup_state(root, runtime)
+    if state in ('preparing', 'finalizing'):
+        print('正在核对并接续上次中断的配置事务……')
+        configure.recover_setup(root, runtime)
+        state = setup_state(root, runtime)
     if state == 'configured':
         print('已有 QQ 绑定，直接保留，不再索取密钥。')
         return True
@@ -124,23 +138,19 @@ def pair(root: Path, runtime: Path, *, ask=input, hidden=getpass.getpass) -> boo
     logs = runtime / 'logs'
     logs.mkdir(parents=True, exist_ok=True)
     log_path = logs / 'setup-gateway.log'
-    flags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NEW_CONSOLE if os.name == 'nt' else 0
-    startup = None
-    if os.name == 'nt':
-        startup = subprocess.STARTUPINFO()
-        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-        startup.wShowWindow = 0
     openid = ''
     with log_path.open('ab') as log:
-        child = subprocess.Popen([str(root / GATEWAY_RELATIVE), '--config', str(runtime / 'cc-connect.toml')],
-            cwd=root, stdin=subprocess.DEVNULL, stdout=log, stderr=log, close_fds=True,
-            creationflags=flags, startupinfo=startup)
-        try:
+        offset = log.tell()
+        print('正在连接 QQ，等待 WebSocket READY（最多 45 秒，可按 Ctrl+C 取消）……', flush=True)
+        with PairingGateway([str(root / GATEWAY_RELATIVE), '--config', str(runtime / 'cc-connect.toml')],
+                            cwd=root, log=log) as child:
+            wait_gateway_ready(child, log_path, offset=offset)
             print('\n请用自己的 QQ 私聊机器人，发送“绑定”。此阶段只查询身份，不连接 Codex。')
             print('将机器人返回的 OpenID 填到这里（不是普通 QQ 号）；输入“取消”可保留进度退出。')
             while True:
-                if child.poll() is not None:
-                    raise ValueError('配置网关已停止；请在本机检查 ' + str(log_path) + '，不要上传含密钥的配置。')
+                code = child.poll()
+                if code is not None:
+                    raise ValueError(f'配置网关已停止（退出码 {code}）；请在本机检查 {log_path}，不要上传含密钥的配置。')
                 candidate = ask('OpenID（还未收到可回车检查）：').strip()
                 if candidate == '取消':
                     return False
@@ -155,27 +165,10 @@ def pair(root: Path, runtime: Path, *, ask=input, hidden=getpass.getpass) -> boo
                     return False
                 openid = candidate
                 break
-        finally:
-            stop_pairing(child)
     # The temporary identity gateway must be gone before replacing its config.
     configure.bind(root, runtime, openid)
     print('QQ 绑定已保存。')
     return True
-
-
-def stop_pairing(child) -> None:
-    if child.poll() is not None:
-        return
-    if os.name == 'nt':
-        from launcher import _send_windows_ctrl_break
-        _send_windows_ctrl_break(child.pid)
-    else:
-        child.terminate()
-    try:
-        child.wait(timeout=8)
-    except subprocess.TimeoutExpired:
-        child.terminate()
-        child.wait(timeout=5)
 
 
 def start_application(codex_home: Path, runtime: Path) -> bool:
@@ -247,7 +240,7 @@ def main() -> int:
         if lock is None:
             raise ValueError('已有安装向导在运行，请回到原窗口继续。')
         try:
-            prepare_files(ROOT)
+            prepare_files(ROOT, runtime / 'logs')
             if args.prepare:
                 if status['setup_state'] == 'configured':
                     print('程序文件已就绪，已有 QQ 绑定保持不变；可运行 install.cmd 接续启动和钩子确认，无需重新绑定。')
@@ -261,6 +254,9 @@ def main() -> int:
             os.close(lock[0])
     except (KeyboardInterrupt, EOFError):
         print('\n已停止；已有配置和未完成的绑定进度均保留，下次运行 install.cmd 继续。')
+        return 1
+    except InstallFailure as error:
+        print('安装未完成：' + str(error) + '\n配置与绑定进度已保留。', file=sys.stderr)
         return 1
     except Exception as error:
         # Parser/OS/HTTP bodies may carry config lines. Only our exact ValueError

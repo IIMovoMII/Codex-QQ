@@ -11,6 +11,7 @@ from control_backend import NativeBackend
 from test_desktop_control import FakePipe, THREAD, TURN
 from test_steer_fork_backend import idle_state
 from desktop_control import DesktopControlError
+from desktop_control import QUEUED_FOLLOWUPS_METHOD
 
 START = 'thread-follower-start-turn'
 CLIENT = '00000000-0000-4000-8000-000000000005'
@@ -21,6 +22,27 @@ class StartPipe(FakePipe):
         super().write(message)
         if message.get('method') == START and self.pending[-1].get('resultType') == 'success':
             self.pending[-1]['result'] = self.result
+
+
+class QueuePipe(FakePipe):
+    def __init__(self, catalog, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.catalog = catalog
+
+    def write(self, message):
+        super().write(message)
+        if message.get('method') == QUEUED_FOLLOWUPS_METHOD:
+            self.catalog.rows = copy.deepcopy(message['params']['state'][THREAD])
+            self.pending[-1]['result'] = {'ok': True}
+
+
+class QueueCatalog:
+    def __init__(self):
+        self.rows = [{'id': 'existing', 'text': '已有消息',
+                      'submission': {'hostId': 'local', 'status': 'queued'}}]
+
+    def saved_queue_rows(self, _thread):
+        return copy.deepcopy(self.rows)
 
 
 class MessageSubmissionTests(unittest.TestCase):
@@ -157,6 +179,25 @@ class MessageSubmissionTests(unittest.TestCase):
         self.queue.return_value = (False, 'codex queue 超时。')
         self.assertEqual(self.send()['state'], 'rejected')
         self.assertEqual(self.starts(), [])
+        self.queue.assert_not_called()
+
+    def test_busy_message_is_appended_to_desktop_visible_queue(self):
+        catalog = QueueCatalog()
+        pipe = QueuePipe(catalog)
+        state = {**self.state, 'turn': {'turnId': TURN, 'status': 'inProgress'},
+                 'runtime': {'type': 'active'}}
+        backend = NativeBackend(pipe_factory=lambda: pipe, contract_check=lambda: None, catalog=catalog)
+        backend.snapshot = lambda _thread: copy.deepcopy(state)
+        backend.probe = lambda: ('same-desktop', 1)
+        with patch('control_backend.pipe_server_identity', return_value=('same-desktop', 1, 'Codex.exe')):
+            result = backend.submit_message(THREAD, '忙时中文😀', 'same-desktop', CLIENT, self.queue)
+        self.assertEqual(result['state'], 'confirmed')
+        self.assertEqual(result['mode'], 'queued')
+        self.assertTrue(result['native'])
+        self.assertEqual(result['queue_id'], CLIENT)
+        self.assertEqual([row['id'] for row in catalog.rows], ['existing', CLIENT])
+        request = next(message for message in pipe.writes if message.get('method') == QUEUED_FOLLOWUPS_METHOD)
+        self.assertEqual([row['id'] for row in request['params']['state'][THREAD]], ['existing', CLIENT])
         self.queue.assert_not_called()
 
 

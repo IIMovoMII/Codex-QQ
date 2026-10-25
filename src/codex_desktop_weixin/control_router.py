@@ -47,8 +47,9 @@ class ControlRouter:
             from launcher import read_monitor_pid
             mode = runtime_mode(root)
             return mode == 'desktop' or mode == 'independent' and read_monitor_pid(root, require_ready=True) is not None
+        catalog = LocalCatalog(codex)
         return cls(ControlStore(data / "control-state.sqlite", legacy_routes=data / "qq-desktop-routes.json"),
-                   LocalCatalog(codex), NativeBackend(), queue_func, availability_check=available)
+                   catalog, NativeBackend(catalog=catalog), queue_func, availability_check=available)
 
     def handle(self, params: Any) -> str:
         if self.availability_check is not None:
@@ -381,8 +382,8 @@ class ControlRouter:
             payload.encode("utf-8", errors="strict")
         except UnicodeEncodeError:
             return "消息包含损坏字符，未发送，请重新输入原文。", "rejected"
-        # Match the safe current path: idle/paused starts a new native turn;
-        # busy fails closed until a visible atomic queue append is available.
+        # Match Desktop's composer: idle/paused starts a new native turn; a
+        # running task appends to the same visible native follow-up list.
         result = self.backend.submit_message(thread_id, payload, meta['_desktop_identity'],
                                              str(uuid.uuid4()), self.queue_func)
         if result['state'] != 'confirmed':
@@ -391,6 +392,14 @@ class ControlRouter:
             return self._card(scope, 'thread', {'thread_id': thread_id},
                               f"💬 {self.catalog.label(row)}\n\n已进入对话，这条新消息没有排队。\n沿用本对话的模型、思考档位和权限，完成或出错后再提醒你。\n以前的排队消息仍保留。"), 'confirmed'
         if result['mode'] == 'queued':
+            if result.get('native') and result.get('entry'):
+                entry = result['entry']
+                body = (f"{self.catalog.label(row)}\n\n"
+                        "⏳ 已加入 Codex Desktop 的可见待发送列表，会在当前任务后按顺序处理。\n"
+                        f"队列编号：{entry['id']}\n"
+                        "引用本条回复“队列”可查看；回复“删除”只撤回仍在排队的这一条。\n"
+                        "不会把消息放入看不见的后台队列，也不会自动改成引导。")
+                return self._card(scope, 'queued', {'thread_id': thread_id, 'entry': entry}, body, ttl=None), 'confirmed'
             from submission_receipts import queue_ack, digest, status_text
             queue_id = queue_ack(result['detail'], thread_id)
             if queue_id:

@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import urllib.request
+import urllib.error
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,14 @@ UPSTREAM_REVISION = '17c61062c2f9ce9bcdd45a2082e491f9743a2770'
 # update this pin; the downloaded checksum is not its own trust anchor.
 BINARY_SHA256 = '05c7db95eb3454686e1d2833a109e29d030146e610263e40cfd2809ca5389297'
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
+
+
+class GatewayDownloadError(OSError):
+    stage = 'QQ 网关下载'
+
+    def __init__(self, safe_detail):
+        self.safe_detail = safe_detail
+        super().__init__(safe_detail)
 
 
 def _download(url: str, path: Path) -> None:
@@ -95,8 +104,13 @@ def fetch(*, target: Path, tag: str = RELEASE_TAG, repository: str = REPOSITORY)
         temp = Path(temp_name)
         archive = temp / ASSET_NAME
         checksum_file = temp / CHECKSUM_NAME
-        _download(f'{base}/{ASSET_NAME}', archive)
-        _download(f'{base}/{CHECKSUM_NAME}', checksum_file)
+        try:
+            _download(f'{base}/{ASSET_NAME}', archive)
+            _download(f'{base}/{CHECKSUM_NAME}', checksum_file)
+        except urllib.error.HTTPError as error:
+            raise GatewayDownloadError(f'GitHub 发布文件下载返回 HTTP {error.code}；未写入网关。') from None
+        except (OSError, ValueError) as error:
+            raise GatewayDownloadError('发布包下载失败：' + type(error).__name__) from None
         expected = _expected_checksum(checksum_file.read_text(encoding='utf-8'), ASSET_NAME)
         actual = _sha256(archive)
         if actual != expected:

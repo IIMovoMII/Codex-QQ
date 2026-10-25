@@ -19,7 +19,7 @@ tools/                    安装向导、诊断与发布工具
 vendor/cc-connect/        固定基线的适配与精简构建补丁
 ```
 
-Python 运行部分只使用标准库。桌面可执行入口是小型 C# 启动器，通过现有 Explorer 启动 Python，避免继承 Codex 的作业组而随 Desktop 一起退出。它不是单文件打包器。
+先读根目录的 [长期维护入口](../MAINTENANCE.md)，再按问题查本页。Python 运行部分只使用标准库。小型 C# 启动器通过现有 Explorer 启动 Python，避免继承 Codex 的作业组而随 Desktop 一起退出。
 
 ## 消息路径
 
@@ -28,7 +28,7 @@ Codex 本地事件/增量日志 → 状态判断 → 本地通知队列 → CC C
 QQ 引用 + 正文 → CC Connect 元信息 → 引用路由 → 当前 Desktop 的原生入口
 ```
 
-原生接口按实际进程身份和所需方法核对，不根据文件名或安装目录中的版本号猜测。普通发送区分空闲/暂停与忙碌状态；空闲/暂停时通过 Desktop 所有者开始新一轮。运行中消息暂时拒绝，不能调用独立 `codex queue` 假装进入当前 Desktop 的可见队列；写操作结果未知时不自动换路径重试。
+原生接口按实际进程身份和所需方法核对，不根据文件名或安装目录中的版本号猜测。普通发送区分空闲/暂停与忙碌状态；空闲/暂停时通过 Desktop 所有者开始新一轮，运行中通过 `thread-follower-set-queued-follow-ups-state` 追加到同一可见待发送列表。该接口是整份快照替换，必须保留原有条目并回读核对；写操作结果未知时不自动换路径或调用独立 `codex queue` 重试。
 
 原生工具连接接受 `codex-app-tools-*` 和旧 `codex-browser-use-*` 名称。缓存只绑定当前 Desktop 进程身份，钩子提示和继承的环境变量都可能过期；失效时按需读取本地管道名称清单，限制候选数量、总时间，并在发送 `tools/list` 前核对实际服务进程。发现只发生在明确调用时，不增加常驻扫描。确认目录后校验所用工具参数，提交前再次核对身份；`tools/call` 一旦开始，任何失败都不能触发换端点重发。显式指定的非法端点不启用自动发现。
 
@@ -45,6 +45,12 @@ py -3 -X utf8 tools/check_publication.py
 
 Windows 原生测试中有隔离进程、托盘和注册表场景；不要把测试通过当作所有机器、所有 Desktop 版本或 QQ 实收均已验证。CI 检查 Python 3.11/3.13，并在干净环境重新构建固定基线的 QQ 网关。首次安装只使用安装向导及少量就绪检查，不要求用户或安装智能体运行开发测试。新人的首次绑定流程仍需端到端使用反馈。
 
+安装回归分别见 `test_setup_process.py`（含 Windows 真实 Job 进程树、强杀及私有控制台 WM_CLOSE）、`test_setup_recovery.py`（临时目录故障注入）和 `test_setup_diagnostics.py`（真实假构建子进程）。需要只验证启动器构建时运行 `tools/build_resident_app.py --output-dir <隔离临时目录>`，不要覆盖现用 `bin` 或网关。
+
+临时绑定网关在 CreateProcess 时通过 `PROC_THREAD_ATTRIBUTE_JOB_LIST` 原子加入私有 kill-on-close Job；不能改回先 Popen 再 Assign 的有竞态路径。Job 句柄不继承，只有本次日志和空输入句柄传给子进程；不存在 PID 接管或按进程名清理。配置 v2 事务先写校验进度再发布配置，绑定收尾也有写前记录；`--check` 只读验证，持锁的向导才恢复，v1 进度仍可读。散落且无事务归属证据的临时文件不自动删除。
+
+在其他 Windows 终端宿主实机复核时，用单独的测试机器人和隔离数据目录：分别在等待 READY、等待 OpenID 时点击窗口关闭按钮，再从同一安装目录运行；确认无本次临时进程、旧进度保留且能再次绑定。另测断网、错误密钥、沙箱权限和手机正文实收。自动测试的私有控制台关闭不等于 Windows Terminal、杀毒软件及所有真实 QQ 环境均已验收。
+
 ## CC Connect 适配版
 
 基于 v1.5.0 的固定提交，按 `metadata.patch`、`delivery.patch`、`minimal-build.patch` 顺序应用：
@@ -55,9 +61,9 @@ Windows 原生测试中有隔离进程、托盘和注册表场景；不要把测
 4. QQ 业务错误、缺少消息 ID 不再当作成功。
 5. 精简构建开关同样覆盖上游命令入口，避免未选用的平台/代理被间接导入。
 
-构建只保留 ACP 和 QQ，明确排除其他 Agent；必须检查依赖及二进制编译标记，不能只看 `--version`。基线及第三方许可见[声明](../THIRD_PARTY_NOTICES.md)。不固定 Codex 安装版本与固定第三方构建依赖是两回事。
+配套网关只保留 ACP 和 QQ；校验来源、组件标记及接口，不能只看 `--version`。基线及第三方许可见[声明](../THIRD_PARTY_NOTICES.md)。
 
-普通用户直接运行 `install.cmd`：向导下载本项目 GitHub Releases 的 Windows x64 配套网关，同时校验发布包、固定二进制哈希和 `BUILD_INFO.json` 中的上游提交。已有且通过校验的网关直接复用；不会覆盖其他版本，不提供本机 Go 编译分支。发布包附有第三方声明和适配说明。GitHub 和本机应用使用同一个 CC Connect 适配版，不让安装智能体重新拼装依赖。
+普通用户直接运行 `install.cmd`：向导下载本项目 GitHub Releases 的 Windows x64 配套网关，校验发布包、固定二进制哈希和 `BUILD_INFO.json` 中的上游提交。已有且通过校验的网关直接复用；其他版本按下方流程更新。
 
 ### 更新已有安装
 
@@ -79,7 +85,7 @@ py -3 -X utf8 tools/fetch_gateway.py --target vendor/cc-connect/v1.5.0-desktop-c
 
 ### 发布维护
 
-网关的源码获取、补丁应用和 Go 编译只保留在 GitHub Actions 的 `ci_build_gateway.py` 中；它不是安装入口，本机调用会拒绝执行。CI 使用固定上游提交，先运行 ACP/QQ 包测试和核心元数据回归，再检查精简构建标签、打包并发布。低层构建及打包脚本用于这一流水线，不要求用户操作。
+网关发布由 GitHub Actions 的 `ci_build_gateway.py` 管理。流水线核对固定基线、适配补丁、ACP/QQ 测试和组件标记，再打包发布。
 
 更新网关时发布新标签，同时更新下载器中的发布标签和二进制固定校验值。不要改写已发布标签、上传作者运行目录或把本机配置、密钥带入发布包。只有 Python/安装文档改变时无需重复发布同一网关。
 

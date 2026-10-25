@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import argparse
 import hashlib
 import os
 import subprocess
@@ -15,21 +16,24 @@ from runtime_io import atomic_write_json
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description='生成小型启动器；--output-dir 用于隔离验证')
+    parser.add_argument('--output-dir', type=Path, default=ROOT / 'bin')
+    args = parser.parse_args()
     if os.name != 'nt':
         raise SystemExit('该本机构建入口仅支持 Windows。')
     compiler = Path(os.environ.get('WINDIR', 'C:/Windows')) / 'Microsoft.NET/Framework64/v4.0.30319/csc.exe'
     pythonw = Path(sys.executable).with_name('pythonw.exe')
     if not compiler.is_file() or not pythonw.is_file():
         raise SystemExit('缺少现有 .NET 编译器或 Python 窗口运行时；未安装其他依赖。')
-    output = ROOT / 'bin'
-    output.mkdir(exist_ok=True)
+    output = args.output_dir.resolve()
+    output.mkdir(parents=True, exist_ok=True)
     target = output / 'CodexQQ助手.exe'
     source = ROOT / 'tools/ResidentLauncher.cs'
     fd, name = tempfile.mkstemp(prefix='.launcher-', suffix='.exe', dir=output)
     os.close(fd)
     candidate = Path(name)
     try:
-        subprocess.run([str(compiler), '/nologo', '/target:winexe', '/platform:anycpu',
+        subprocess.run([str(compiler), '/nologo', '/utf8output', '/target:winexe', '/platform:anycpu',
                         '/reference:System.Web.Extensions.dll', '/reference:Microsoft.CSharp.dll',
                         '/out:' + str(candidate), str(source)], check=True)
         os.replace(candidate, target)
@@ -45,4 +49,8 @@ def main() -> int:
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except subprocess.CalledProcessError as error:
+        print(f'启动器编译失败（编译器退出码 {error.returncode}），详细错误见上方。', file=sys.stderr)
+        raise SystemExit(error.returncode) from None

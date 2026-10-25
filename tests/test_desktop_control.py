@@ -12,7 +12,8 @@ sys.path.insert(0, str(PACKAGE_DIR))
 
 from desktop_control import (
     DesktopClient, DesktopControlError, MAX_FRAME_BYTES, STOP_METHOD,
-    STOP_VERSION, WindowsDesktopPipe, encode_frame, pause_desktop,
+    STOP_VERSION, QUEUED_FOLLOWUPS_METHOD, QUEUED_FOLLOWUPS_VERSION,
+    WindowsDesktopPipe, encode_frame, pause_desktop,
 )
 
 
@@ -54,6 +55,8 @@ class FakePipe:
             response["result"] = {"supportsUntrustedAppInput": True}
         elif method == STOP_METHOD:
             response["result"] = self.result
+        elif method == QUEUED_FOLLOWUPS_METHOD:
+            response["result"] = {"ok": True}
         if method == self.fail_method and self.failure:
             response.update(resultType="error", error=self.failure)
         self.pending.append(response)
@@ -65,6 +68,23 @@ class FakePipe:
 
 
 class DesktopControlTests(unittest.TestCase):
+    def test_native_queue_snapshot_targets_selected_owner(self) -> None:
+        pipe = FakePipe()
+        client = DesktopClient(pipe)
+        client.initialize()
+        rows = [{"id": "message-1", "text": "中文😀", "submission": {"hostId": "local", "status": "queued"}}]
+        result = client.set_queued_follow_ups(THREAD, rows, "desktop-owner")
+        self.assertEqual(result, {"ok": True})
+        request = pipe.writes[-1]
+        self.assertEqual(request["method"], QUEUED_FOLLOWUPS_METHOD)
+        self.assertEqual(request["version"], QUEUED_FOLLOWUPS_VERSION)
+        self.assertEqual(request["targetClientId"], "desktop-owner")
+        self.assertEqual(request["params"], {
+            "conversationId": THREAD,
+            "state": {THREAD: rows},
+            "discardedMessageIds": [],
+        })
+
     def test_native_user_stop_targets_selected_owner_without_starting_an_agent(self) -> None:
         pipe = FakePipe()
         ok, detail = pause_desktop(THREAD, pipe_factory=lambda: pipe)

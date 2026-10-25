@@ -14,26 +14,13 @@ import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'src/codex_desktop_weixin'))
-from runtime_io import atomic_write_json, default_data_dir
+from runtime_io import acquire_file_lock, atomic_write_json, default_data_dir
 
 PROJECT = 'codex-qq'
 BLOCKED_COMMANDS = ('new list switch name current status usage history allow model reasoning mode lang quiet '
                     'provider memory cron timer heartbeat compress stop cancel help start version commands skills '
                     'config doctor upgrade restart alias delete bind search shell diff show dir tts workspace '
                     'whoami web ps').split()
-
-
-def atomic_write_text(path: Path, text: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix='.' + path.name, suffix='.tmp', dir=path.parent)
-    try:
-        with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as stream:
-            stream.write(text)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(name, path)
-    finally:
-        Path(name).unlink(missing_ok=True)
 
 
 def config_text(root: Path, data: Path, app_id: str, secret: str, openid: str = '', *, sandbox=False) -> str:
@@ -94,18 +81,129 @@ def prepare(root: Path, runtime: Path, cc_data: Path, app_id: str, secret: str, 
     if len(str(cc_data / 'run/api.sock').encode('utf-8')) >= 104:
         raise ValueError('QQ 数据路径过长，请用 --cc-data-dir 指定更短的当前用户私有目录。')
     text = config_text(root, cc_data, app_id, secret, sandbox=sandbox)
-    atomic_write_text(config, text)
-    atomic_write_json(runtime / 'setup-pending.json', {'version': 1, 'root': str(root.resolve()),
-        'config_sha256': hashlib.sha256(config.read_bytes()).hexdigest(), 'cc_data': str(cc_data.resolve())})
+    staged = stage_bytes(runtime, text.encode('utf-8'))
+    pending = runtime / 'setup-pending.json'
+    state = {'version': 2, 'phase': 'preparing', 'root': str(root.resolve()),
+             'config_sha256': sha(text.encode('utf-8')), 'cc_data': str(cc_data.resolve()),
+             'staged': staged.name}
+    try:
+        # Write-ahead marker precedes publishing the config. A crash at either
+        # rename is recoverable; two renames are NOT a cross-file transaction.
+        if pending.exists() or config.exists() or (runtime / 'settings.json').exists():
+            raise ValueError('配置在准备期间出现，未覆盖；请核对现有安装。')
+        candidate = stage_bytes(runtime, b'')
+        try:
+            atomic_write_json(candidate, state)
+            publish_new(candidate, pending)
+        finally:
+            candidate.unlink(missing_ok=True)
+    except BaseException:
+        if not pending.exists():
+            staged.unlink(missing_ok=True)  # created by this invocation only
+        raise
+    recover_setup(root, runtime)
     return config
+
+
+def sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def stage_bytes(runtime: Path, payload: bytes) -> Path:
+    runtime.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix='.setup-', suffix='.tmp', dir=runtime)
+    path = Path(name)
+    try:
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
+    return path
+
+
+def publish_new(staged: Path, target: Path) -> None:
+    """Never replace a user's file, including one appearing during setup."""
+    if os.name == 'nt':
+        staged.rename(target)
+    else:
+        os.link(staged, target)
+        staged.unlink()
+
+
+def _state(root: Path, runtime: Path) -> dict:
+    state = json.loads((runtime / 'setup-pending.json').read_text(encoding='utf-8-sig'))
+    if (not isinstance(state, dict) or state.get('version') not in (1, 2)
+            or state.get('root') != str(root.resolve())
+            or not isinstance(state.get('cc_data'), str)
+            or not isinstance(state.get('config_sha256'), str)
+            or not re.fullmatch(r'[0-9a-f]{64}', state['config_sha256'])):
+        raise ValueError('绑定进度格式或安装路径不一致，原文件已保留；请核对 setup-pending.json。')
+    return state
+
+
+def _staged(runtime: Path, state: dict) -> Path:
+    name = state.get('staged', '')
+    if not isinstance(name, str) or not re.fullmatch(r'\.setup-[A-Za-z0-9_-]+\.tmp', name):
+        raise ValueError('配置事务暂存路径不合法，已保留所有文件。')
+    path = runtime / name
+    if path.is_symlink():
+        raise ValueError('配置事务暂存文件不能是链接，已保留。')
+    return path
+
+
+def _matching(path: Path, expected: str) -> bool:
+    return path.is_file() and not path.is_symlink() and sha(path.read_bytes()) == expected
+
+
+def pending_phase(root: Path, runtime: Path) -> str:
+    """Read-only validation, also used by --check before any recovery write."""
+    state = _state(root, runtime)
+    phase = state.get('phase', 'pairing') if state['version'] == 2 else 'pairing'
+    config = runtime / 'cc-connect.toml'
+    if phase == 'pairing':
+        load_pending(root, runtime)
+    elif phase == 'preparing':
+        staged = _staged(runtime, state)
+        if config.exists():
+            if not _matching(config, state['config_sha256']):
+                raise ValueError('准备期间配置发生变化，拒绝覆盖；请核对配置与绑定进度。')
+        elif not _matching(staged, state['config_sha256']):
+            raise ValueError('配置暂存内容缺失或损坏，已保留进度；请人工核对，不要删除已有配置。')
+        payload = config if config.exists() else staged
+        tomllib.loads(payload.read_text(encoding='utf-8'))
+    elif phase == 'binding':
+        _binding_plan(root, runtime, state)
+    else:
+        raise ValueError('未知配置事务阶段，已保留；请检查 setup-pending.json。')
+    return phase
+
+
+def recover_setup(root: Path, runtime: Path) -> None:
+    """Replay only the exact hashed transaction; caller owns setup.lock."""
+    if not (runtime / 'setup-pending.json').exists():
+        return
+    phase = pending_phase(root, runtime)
+    state = _state(root, runtime)
+    if phase == 'preparing':
+        config, staged = runtime / 'cc-connect.toml', _staged(runtime, state)
+        if not config.exists():
+            publish_new(staged, config)
+        state['phase'] = 'pairing'
+        state.pop('staged', None)
+        atomic_write_json(runtime / 'setup-pending.json', state)
+    elif phase == 'binding':
+        _complete_binding(root, runtime, state)
 
 
 def load_pending(root: Path, runtime: Path) -> tuple[dict, dict]:
     """Validate a resumable setup before allowing its identity-only gateway."""
-    state = json.loads((runtime / 'setup-pending.json').read_text(encoding='utf-8'))
+    state = _state(root, runtime)
     config = runtime / 'cc-connect.toml'
-    if (not isinstance(state, dict) or state.get('version') != 1 or state.get('root') != str(root.resolve())
-            or state.get('config_sha256') != hashlib.sha256(config.read_bytes()).hexdigest()):
+    if (state.get('phase', 'pairing') != 'pairing'
+            or not _matching(config, state['config_sha256'])):
         raise ValueError('首次配置文件已变化，拒绝自动替换。')
     parsed = tomllib.loads(config.read_text(encoding='utf-8'))
     return state, parsed
@@ -123,20 +221,60 @@ def bind(root: Path, runtime: Path, openid: str) -> None:
     executable = root / 'vendor/cc-connect/v1.5.0-desktop-control/bin/cc-connect-desktop-control.exe'
     if not executable.is_file():
         raise ValueError('请先运行 install.cmd 下载配套 CC Connect 网关。')
-    # User stops the foreground pairing gateway before this step. The native
-    # app later owns the production process; no forced kills during setup.
     cc_data = Path(state['cc_data'])
-    old = config.read_text(encoding='utf-8')
+    bound = config_text(root, cc_data, opts['app_id'], opts['app_secret'], openid,
+                        sandbox=opts.get('sandbox', False)).encode('utf-8')
+    staged = stage_bytes(runtime, bound)
+    state.update(version=2, phase='binding', staged=staged.name, bound_sha256=sha(bound),
+                 settings={'mode': 'cc-connect', 'executable': str(executable),
+                           'project': PROJECT, 'session': 'qqbot:' + openid, 'data_dir': str(cc_data),
+                           'config_path': str(config), 'timeout_seconds': 15})
     try:
-        atomic_write_text(config, config_text(root, cc_data, opts['app_id'], opts['app_secret'], openid,
-                                             sandbox=opts.get('sandbox', False)))
-        atomic_write_json(runtime / 'settings.json', {'mode': 'cc-connect', 'executable': str(executable),
-            'project': PROJECT, 'session': 'qqbot:' + openid, 'data_dir': str(cc_data),
-            'config_path': str(config), 'timeout_seconds': 15})
-    except Exception:
-        atomic_write_text(config, old)
+        atomic_write_json(pending, state)
+    except BaseException:
+        if _state(root, runtime).get('phase', 'pairing') == 'pairing':
+            staged.unlink(missing_ok=True)
         raise
-    pending.unlink()
+    _complete_binding(root, runtime, state)
+
+
+def _binding_plan(root: Path, runtime: Path, state: dict) -> None:
+    staged, config = _staged(runtime, state), runtime / 'cc-connect.toml'
+    desired = state.get('settings')
+    expected = state.get('bound_sha256', '')
+    if not isinstance(desired, dict) or not isinstance(expected, str) or not re.fullmatch(r'[0-9a-f]{64}', expected):
+        raise ValueError('绑定事务记录不完整，已保留文件，请人工核对。')
+    session = desired.get('session', '')
+    openid = session.removeprefix('qqbot:') if isinstance(session, str) else ''
+    executable = root / 'vendor/cc-connect/v1.5.0-desktop-control/bin/cc-connect-desktop-control.exe'
+    if (not isinstance(session, str) or not session.startswith('qqbot:') or not re.fullmatch(r'[A-Za-z0-9_-]{8,128}', openid)
+            or openid.isdecimal() or desired != {'mode': 'cc-connect', 'executable': str(executable),
+                'project': PROJECT, 'session': session, 'data_dir': state['cc_data'],
+                'config_path': str(config), 'timeout_seconds': 15}):
+        raise ValueError('绑定事务目标不一致，拒绝自动接续。')
+    if not (_matching(config, state['config_sha256']) or _matching(config, expected)):
+        raise ValueError('绑定期间配置已被修改，拒绝覆盖，原文件已保留。')
+    if not _matching(config, expected) and not _matching(staged, expected):
+        raise ValueError('绑定暂存内容缺失或损坏，原配置和进度已保留。')
+    settings = runtime / 'settings.json'
+    if settings.exists() and json.loads(settings.read_text(encoding='utf-8-sig')) != desired:
+        raise ValueError('发现其他正式绑定，拒绝覆盖；请核对配置与绑定进度。')
+
+
+def _complete_binding(root: Path, runtime: Path, state: dict) -> None:
+    _binding_plan(root, runtime, state)
+    config, staged = runtime / 'cc-connect.toml', _staged(runtime, state)
+    if not _matching(config, state['bound_sha256']):
+        os.replace(staged, config)  # replace only the checked identity-only config
+    settings = runtime / 'settings.json'
+    if not settings.exists():
+        candidate = stage_bytes(runtime, (json.dumps(state['settings'], ensure_ascii=False, indent=2) + '\n').encode('utf-8'))
+        try:
+            publish_new(candidate, settings)
+        finally:
+            candidate.unlink(missing_ok=True)  # this invocation's candidate
+    # Interruption before unlink is recognized as completed on the next run.
+    (runtime / 'setup-pending.json').unlink()
 
 
 def main() -> None:
@@ -148,7 +286,11 @@ def main() -> None:
     args = parser.parse_args()
     if os.name != 'nt':
         raise SystemExit('当前版本仅支持 Windows。')
+    lock = acquire_file_lock(args.data_dir / 'state/setup.lock')
+    if lock is None:
+        raise SystemExit('已有配置向导正在运行，未修改配置。')
     try:
+        recover_setup(ROOT, args.data_dir.resolve())
         if args.bind:
             print('请先在配置网关的窗口按 Ctrl+C 停止它。')
             openid = input('粘贴你在 QQ 私聊中收到的 OpenID：').strip()
@@ -169,6 +311,8 @@ def main() -> None:
         if isinstance(error, tomllib.TOMLDecodeError):
             raise SystemExit('配置格式不正确；请在本机检查，不要上传含密钥的文件。') from None
         raise SystemExit(str(error) if type(error) is ValueError else '配置未完成：' + type(error).__name__) from None
+    finally:
+        os.close(lock[0])
 
 
 if __name__ == '__main__':

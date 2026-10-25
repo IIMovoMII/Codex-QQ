@@ -26,6 +26,24 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(catalog.saved_queue('other'), [])
             self.assertEqual(path.read_bytes(), original)
 
+    def test_saved_queue_rows_preserve_native_fields_and_reject_cross_host_rows(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / '.codex-global-state.json'
+            row = {'id': 'stable-id', 'text': '中文😀', 'createdAt': 17,
+                   'submission': {'hostId': 'local', 'status': 'queued'},
+                   'futureField': {'kept': True}}
+            path.write_text(json.dumps({'queued-follow-ups': {'target': [row]}}, ensure_ascii=False), encoding='utf-8')
+            catalog = LocalCatalog(root)
+            returned = catalog.saved_queue_rows('target')
+            self.assertEqual(returned, [row])
+            returned[0]['futureField']['kept'] = False
+            self.assertEqual(catalog.saved_queue_rows('target')[0]['futureField']['kept'], True)
+            path.write_text(json.dumps({'queued-follow-ups': {'target': [
+                {**row, 'submission': {'hostId': 'remote', 'status': 'queued'}}]}}, ensure_ascii=False), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'cross-host-queue'):
+                catalog.saved_queue_rows('target')
+
     def test_models_use_explicit_catalog_and_reject_duplicate_identifiers(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

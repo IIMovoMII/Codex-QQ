@@ -20,9 +20,10 @@ from typing import Any
 PIPE_PATH = r"\\.\pipe\codex-ipc"
 MAX_FRAME_BYTES = 8 * 1024 * 1024
 STOP_METHOD = "thread-follower-interrupt-turn"
-# 本机 26.1007.2314.0：无 expectedTurnId 的本地 user-stop 请求使用版本 3。
-# 它会暂停原生目标、清理正在运行的执行，并处理子代理，和 Desktop 按钮同路。
+# 无 expectedTurnId 的本地 user-stop 请求使用当前协议声明的版本。
 STOP_VERSION = 3
+QUEUED_FOLLOWUPS_METHOD = "thread-follower-set-queued-follow-ups-state"
+QUEUED_FOLLOWUPS_VERSION = 1
 
 
 class DesktopControlError(Exception):
@@ -189,6 +190,26 @@ class DesktopClient:
         if response.get("handledByClientId") != owner_id:
             raise DesktopControlError("invalid-response")
         return response["result"]
+
+    def set_queued_follow_ups(self, thread_id: str, rows: list[dict[str, Any]],
+                              owner_id: str, discarded_message_ids: list[str] | None = None) -> dict[str, Any]:
+        """Replace one Desktop-owned visible follow-up snapshot.
+
+        The caller must read and preserve existing rows before adding one. This
+        helper deliberately does not implement an unsafe blind append.
+        """
+        response = self.request(
+            QUEUED_FOLLOWUPS_METHOD,
+            {"conversationId": thread_id, "state": {thread_id: rows},
+             "discardedMessageIds": list(discarded_message_ids or [])},
+            version=QUEUED_FOLLOWUPS_VERSION, target_client_id=owner_id,
+        )
+        if response.get("handledByClientId") != owner_id:
+            raise DesktopControlError("invalid-response")
+        result = response.get("result")
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            raise DesktopControlError("invalid-response")
+        return result
 
 
 def pause_desktop(thread_id: str, *, pipe_factory: Any = WindowsDesktopPipe) -> tuple[bool, str]:

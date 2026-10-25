@@ -5,19 +5,23 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import threading
 import time
 from typing import Any
 
-from desktop_control import DesktopClient, DesktopControlError, WindowsDesktopPipe, pause_desktop, pipe_server_identity
+from desktop_control import (DesktopClient, DesktopControlError, QUEUED_FOLLOWUPS_METHOD,
+                             WindowsDesktopPipe, pause_desktop, pipe_server_identity)
 
 
 class NativeBackend:
     def __init__(self, *, pipe_factory: Any = WindowsDesktopPipe, contract_check: Any = None,
-                 app_tools: Any = None) -> None:
+                 app_tools: Any = None, catalog: Any = None) -> None:
         self.pipe_factory = pipe_factory
         self.contract_check = contract_check
         self.process_image: str | None = None
         self.app_tools = app_tools
+        self.catalog = catalog
+        self._queue_locks: dict[str, threading.Lock] = {}
 
     def native_tools(self) -> Any:
         if self.app_tools is None:
@@ -227,13 +231,76 @@ class NativeBackend:
             return 'started'
         return 'unavailable'
 
+    def enqueue_native_follow_up(self, thread_id: str, text: str, connection: str,
+                                 operation_id: str) -> dict:
+        """Append one message to Desktop's visible native follow-up queue.
+
+        The Desktop IPC accepts a whole snapshot, not an atomic append. Read the
+        current local snapshot, preserve every row, submit once to the verified
+        owner, then read it back. A lost response or changed snapshot is unknown
+        and is never retried through the hidden app-server queue.
+        """
+        catalog = self.catalog
+        if catalog is None or not hasattr(catalog, 'saved_queue_rows'):
+            return {'state': 'rejected', 'reply': '当前无法读取 Desktop 可见待发送列表，未发送、未排队。请在电脑查看。'}
+        lock = self._queue_locks.setdefault(thread_id, threading.Lock())
+        with lock:
+            try:
+                current = self.snapshot(thread_id)
+                if self._message_route(current) != 'queued':
+                    return {'state': 'rejected', 'reply': '对话状态已变化，这条消息未发送、未排队；请重新查询后发送。'}
+                identity, _ = self.probe()
+                if identity != connection or current.get('owner_id') is None:
+                    return {'state': 'rejected', 'reply': 'Codex 连接或对话所有者已变化，这条消息未发送、未排队。'}
+                rows = catalog.saved_queue_rows(thread_id)
+                if any(row.get('id') == operation_id for row in rows):
+                    return {'state': 'rejected', 'reply': '这条消息编号已存在，未重复加入队列。'}
+                if len(rows) >= 200:
+                    return {'state': 'rejected', 'reply': 'Desktop 可见待发送列表已达到上限，这条消息未发送、未排队。'}
+                row = {
+                    'id': operation_id,
+                    'text': text,
+                    'createdAt': int(time.time() * 1000),
+                    'submission': {'hostId': 'local', 'status': 'queued'},
+                }
+                next_rows = [*rows, row]
+                result = self.call(
+                    thread_id, 'thread-follower-set-queued-follow-ups-state',
+                    {'state': {thread_id: next_rows}, 'discardedMessageIds': []}, 1,
+                    expected_owner=current['owner_id'], expected_connection=connection,
+                )
+            except (DesktopControlError, OSError, TimeoutError, ValueError, TypeError, KeyError):
+                return {'state': 'rejected', 'reply': '无法核实 Desktop 当前待发送列表，这条消息未发送、未排队。请在电脑查看。'}
+            if result['state'] != 'confirmed':
+                return {'state': result['state'], 'reply':
+                        '已尝试加入 Desktop 可见待发送列表，但没有取得确认；不会改走隐藏队列或自动重试，请查看电脑。'
+                        if result['state'] == 'unknown' else
+                        'Desktop 当前没有接受这条排队消息，未发送、未排队。'}
+            try:
+                from control_actions import normalize_saved_queue
+                entry = None
+                for _ in range(5):
+                    after_rows = catalog.saved_queue_rows(thread_id)
+                    matches = [item for item in after_rows if item.get('id') == operation_id]
+                    if len(matches) == 1 and matches[0] == row:
+                        entry = normalize_saved_queue([matches[0]])[0]
+                        break
+                    time.sleep(0.05)
+                if entry is None:
+                    raise ValueError('queue-readback-mismatch')
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                return {'state': 'unknown', 'reply':
+                        'Desktop 已受理排队请求，但回读未能确认这条消息；不会重复排队，请在电脑查看。'}
+            return {'state': 'confirmed', 'mode': 'queued', 'native': True,
+                    'queue_id': operation_id, 'entry': entry}
+
     def submit_message(self, thread_id: str, text: str, connection: str,
                        operation_id: str, queue_func: Any) -> dict:
-        """Normal QQ text: start an idle/paused native turn.
+        """Normal QQ text: start idle work or use Desktop's visible busy queue.
 
-        Busy work is rejected until the same Desktop exposes an atomic visible
-        queue append. A lost start confirmation never becomes a second
-        submission via another path. Existing queued work is kept.
+        A lost native confirmation never becomes a second submission via another
+        path. The legacy queue callback is retained for compatibility but is
+        intentionally never used for this normal-message path.
         """
         try:
             text.encode('utf-8', errors='strict')
@@ -262,14 +329,7 @@ class NativeBackend:
         if route == 'unavailable':
             return {'state': 'rejected', 'reply': '原生状态尚未就绪或上次提交未确认，未发送新消息、未排队。请先在电脑核对。'}
         if route == 'queued':
-            # `codex queue` targets the app-server queue, which this Desktop
-            # build does not expose as the same visible composer queue. The
-            # published send-message tool is an immediate send/steer path, and
-            # the follower queue-state IPC replaces a whole snapshot rather
-            # than atomically appending. Do not silently enqueue elsewhere.
-            return {'state': 'rejected', 'reply':
-                    '这条对话正在运行，但目前没有可安全加入 Desktop 可见待发送列表的接口；本条未发送、未排队。'
-                    '如需立即补充，请明确发送“引导 正文”；否则等当前任务结束后再发送。'}
+            return self.enqueue_native_follow_up(thread_id, text, connection, operation_id)
         if (before.get('mode') not in (None, 'default')
                 or before.get('thread_start_kind') not in (None, 'default')
                 or not isinstance(before.get('cwd'), str) or not before['cwd']):
@@ -402,6 +462,14 @@ class NativeBackend:
                     from control_contract import check_method_contract
                     check_method_contract(pipe_server_identity(pipe)[2], method, version)
                 sent = True
+                if method == QUEUED_FOLLOWUPS_METHOD:
+                    state = params.get('state')
+                    rows = state.get(thread_id) if isinstance(state, dict) else None
+                    discarded = params.get('discardedMessageIds', [])
+                    if not isinstance(rows, list) or not isinstance(discarded, list):
+                        raise DesktopControlError('invalid-queue-state')
+                    result = client.set_queued_follow_ups(thread_id, rows, owner, discarded)
+                    return {"state": "confirmed", "result": result}
                 response = client.request(method, {"conversationId": thread_id, **params}, version=version, target_client_id=owner)
                 if response.get("handledByClientId") != owner:
                     raise DesktopControlError("owner-mismatch")

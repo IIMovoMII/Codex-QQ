@@ -42,7 +42,7 @@ class InstallWizardTests(unittest.TestCase):
             root, runtime = Path(temp), Path(temp) / 'runtime'
             self.make_formal(root, runtime)
             before = {p.name: p.read_bytes() for p in runtime.iterdir() if p.is_file()}
-            with patch.object(install_app.subprocess, 'Popen') as child, contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(install_app, 'PairingGateway') as child, contextlib.redirect_stdout(io.StringIO()):
                 self.assertTrue(install_app.pair(root, runtime, ask=Mock(side_effect=AssertionError),
                                                  hidden=Mock(side_effect=AssertionError)))
             child.assert_not_called()
@@ -62,7 +62,7 @@ class InstallWizardTests(unittest.TestCase):
             root, runtime = Path(temp), Path(temp) / 'runtime'
             config = configure.prepare(root, runtime, root / 'cc', '12345678', 'test-only', False)
             config.write_text(config.read_text(encoding='utf-8') + '\n# modified', encoding='utf-8')
-            with patch.object(install_app.subprocess, 'Popen') as child, self.assertRaises(ValueError):
+            with patch.object(install_app, 'PairingGateway') as child, self.assertRaises(ValueError):
                 install_app.pair(root, runtime)
             child.assert_not_called()
 
@@ -73,11 +73,12 @@ class InstallWizardTests(unittest.TestCase):
             original = config.read_bytes()
             child = Mock()
             child.poll.return_value = None
-            with patch.object(install_app.subprocess, 'Popen', return_value=child), \
-                    patch.object(install_app, 'stop_pairing') as stop, contextlib.redirect_stdout(io.StringIO()):
+            with patch.object(install_app, 'PairingGateway') as gateway, \
+                    patch.object(install_app, 'wait_gateway_ready'), contextlib.redirect_stdout(io.StringIO()):
+                gateway.return_value.__enter__.return_value = child
                 self.assertFalse(install_app.pair(root, runtime, ask=lambda _: '取消',
                                                   hidden=Mock(side_effect=AssertionError)))
-            stop.assert_called_once_with(child)
+            gateway.return_value.__exit__.assert_called_once()
             self.assertEqual(original, config.read_bytes())
             self.assertTrue((runtime / 'setup-pending.json').is_file())
             self.assertFalse((runtime / 'settings.json').exists())
@@ -89,10 +90,12 @@ class InstallWizardTests(unittest.TestCase):
             child, events = Mock(), []
             child.poll.return_value = None
             answers = iter(['123456789', 'TEST_OPENID_0001', 'yes'])
-            with patch.object(install_app.subprocess, 'Popen', return_value=child), \
-                    patch.object(install_app, 'stop_pairing', side_effect=lambda p: events.append('stop')), \
+            with patch.object(install_app, 'PairingGateway') as gateway, \
+                    patch.object(install_app, 'wait_gateway_ready'), \
                     patch.object(configure, 'bind', side_effect=lambda *a: events.append('bind')), \
                     contextlib.redirect_stdout(io.StringIO()):
+                gateway.return_value.__enter__.return_value = child
+                gateway.return_value.__exit__.side_effect = lambda *args: events.append('stop') or False
                 self.assertTrue(install_app.pair(root, runtime, ask=lambda _: next(answers)))
             self.assertEqual(events, ['stop', 'bind'])
 

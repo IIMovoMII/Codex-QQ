@@ -235,6 +235,20 @@ class ControlRouterTests(unittest.TestCase):
             submit.assert_called_once()
             self.assertEqual(self.calls, [])
 
+    def test_native_busy_queue_returns_visible_queue_card(self):
+        card = self.send('/use ' + THREAD_A)
+        entry = {'id': '00000000-0000-4000-8000-000000000009', 'summary': '忙时消息',
+                 'status': 'queued', 'digest': 'digest', 'paused': False}
+        with patch.object(self.backend, 'submit_message', return_value={
+                'state': 'confirmed', 'mode': 'queued', 'native': True,
+                'queue_id': entry['id'], 'entry': entry}) as submit:
+            reply = self.send('忙时消息', quote=card, message_id='native-queue')
+            self.assertIn('可见待发送列表', reply)
+            self.assertIn(entry['id'], reply)
+            self.assertIn('队列', reply)
+            submit.assert_called_once()
+            self.assertEqual(self.calls, [])
+
     def test_window_error_does_not_mask_version_mismatch_or_unknown_native_state(self):
         card = self.send('/use ' + THREAD_A)
         for error, hint in (('no-client-found', '未载入'),
