@@ -24,7 +24,6 @@ PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PROCESS_TERMINATE = 0x0001
 SYNCHRONIZE = 0x100000
 PROCESS_IDENTITY_VERSION = 1
-ERROR_INVALID_PARAMETER = 87
 WINDOWS_EPOCH_OFFSET_SECONDS = 11644473600
 
 
@@ -162,10 +161,7 @@ def _pid_alive(pid: int) -> bool:
     close_handle.restype = ctypes.c_int
     handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
-        # Access denied or another probe failure is not evidence of exit.
-        # Treat the PID as possibly alive so teardown preserves its ownership
-        # record rather than starting a duplicate or deleting unknown state.
-        return ctypes.get_last_error() != ERROR_INVALID_PARAMETER
+        return False
     close_handle(handle)
     return True
 

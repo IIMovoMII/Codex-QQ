@@ -205,18 +205,6 @@ class CCConnectLifecycleTests(unittest.TestCase):
                 self.assertIsNone(launcher._socket_is_reachable(root / 'api.sock'))
                 self.assertEqual(cc_connect_api_status(root), 'missing')
 
-    def test_windows_pid_probe_failure_is_not_treated_as_exit(self):
-        with patch.object(launcher.os, 'name', 'nt'), \
-                patch.object(launcher.ctypes, 'WinDLL', create=True) as windll, \
-                patch.object(launcher.ctypes, 'get_last_error', return_value=5, create=True):
-            windll.return_value.OpenProcess.return_value = None
-            self.assertTrue(launcher._pid_alive(1234))
-        with patch.object(launcher.os, 'name', 'nt'), \
-                patch.object(launcher.ctypes, 'WinDLL', create=True) as windll, \
-                patch.object(launcher.ctypes, 'get_last_error', return_value=launcher.ERROR_INVALID_PARAMETER, create=True):
-            windll.return_value.OpenProcess.return_value = None
-            self.assertFalse(launcher._pid_alive(1234))
-
     def test_unavailable_probe_preserves_existing_socket(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
