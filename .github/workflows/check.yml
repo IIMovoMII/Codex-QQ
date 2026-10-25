@@ -45,15 +45,15 @@ jobs:
           go-version: '1.25.x'
           cache: false
       - name: 核对基线、应用补丁、仅构建 ACP 和 QQ
-        run: python -X utf8 tools/ci_build_gateway.py --version 1.5.0-desktop-control.5
+        run: python -X utf8 tools/ci_build_gateway.py --version 1.5.0-desktop-control.6
       - name: 打包构建产物并检查来源信息
         shell: pwsh
         run: |
           python -X utf8 tools/package_gateway_release.py `
             --binary vendor/cc-connect/v1.5.0-desktop-control/bin/cc-connect-desktop-control.exe `
             --output-dir dist `
-            --release-tag v1.5.0-desktop-control.5 `
-            --gateway-version 1.5.0-desktop-control.5
+            --release-tag v1.5.0-desktop-control.6 `
+            --gateway-version 1.5.0-desktop-control.6
           if (-not (Test-Path dist/SHA256SUMS.txt)) { throw '未生成发布校验文件' }
       - name: 上传可复核的网关构建产物
         uses: actions/upload-artifact@v4

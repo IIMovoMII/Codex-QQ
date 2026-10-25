@@ -15,6 +15,7 @@ from runtime_io import append_json_line, atomic_write_json, default_data_dir, en
 
 
 HOOK_FORMAT_VERSION = 1
+MAX_HOOK_INPUT_BYTES = 1024 * 1024
 AUTOSTART_WAIT_SECONDS = 30.0
 _RUNTIME_AUTOSTART_EVENTS = {
     "SessionStart",
@@ -24,6 +25,27 @@ _RUNTIME_AUTOSTART_EVENTS = {
     "PostToolUse",
     "Stop",
 }
+
+
+def _validate_hook_input(raw_input: str) -> None:
+    # Check characters first so the UTF-8 size check never makes a second
+    # unbounded copy of an oversized input supplied by an in-process caller.
+    if len(raw_input) > MAX_HOOK_INPUT_BYTES or len(raw_input.encode("utf-8")) > MAX_HOOK_INPUT_BYTES:
+        raise ValueError("Hook input exceeds size limit")
+
+
+def _read_hook_input() -> str:
+    binary = getattr(sys.stdin, "buffer", None)
+    if binary is not None:
+        raw = binary.read(MAX_HOOK_INPUT_BYTES + 1)
+        if len(raw) > MAX_HOOK_INPUT_BYTES:
+            raise ValueError("Hook input exceeds size limit")
+        return raw.decode("utf-8")
+    # StringIO and embedded callers may expose only a text stream. Bound that
+    # read too, then enforce the same byte limit before parsing or writing.
+    raw = sys.stdin.read(MAX_HOOK_INPUT_BYTES + 1)
+    _validate_hook_input(raw)
+    return raw
 
 
 def _safe_text(value: Any, *, limit: int) -> str:
@@ -61,6 +83,7 @@ def sanitize_hook_payload(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def collect_hook_event(raw_input: str, *, data_dir: Path | None = None) -> Path:
+    _validate_hook_input(raw_input)
     payload = json.loads(raw_input)
     if not isinstance(payload, dict):
         raise ValueError("Hook input must be a JSON object")
@@ -213,9 +236,11 @@ def hook_event_to_signals(event: dict[str, Any]) -> list[Signal]:
 
 
 def hook_main() -> int:
-    raw = sys.stdin.read()
-    is_stop = False
+    # Until the event is decoded it may be Stop. A failed/oversized read must
+    # still produce its harmless JSON response and never escape this guard.
+    is_stop = True
     try:
+        raw = _read_hook_input()
         payload = json.loads(raw)
         is_stop = isinstance(payload, dict) and payload.get("hook_event_name") == "Stop"
         collect_hook_event(raw)

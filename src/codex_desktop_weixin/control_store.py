@@ -57,12 +57,11 @@ class ControlStore:
                 db.execute("INSERT INTO meta VALUES('legacy_import','1')")
 
     def begin_bridge_session(self, scope: str, *, now: float | None = None) -> float:
-        """Start a new local bridge generation and invalidate older events.
+        """Record the QQ gateway's ready boundary for this bridge scope.
 
-        The Desktop identity can stay unchanged while the Python bridge is
-        restarted. Persisted QQ events arriving after that restart must still
-        be compared with this process' start boundary, not only the Desktop or
-        gateway readiness time.
+        The gateway may start its ACP child after the triggering message has
+        already arrived. Its READY time, rather than Python process startup,
+        determines which events predate the current QQ connection.
         """
         started = time.time() if now is None else now
         with self.connect() as db:

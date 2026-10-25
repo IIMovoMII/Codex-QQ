@@ -19,7 +19,7 @@ def run(*args, cwd=None):
 
 def main() -> None:
     parser = argparse.ArgumentParser(description='仅供 GitHub Actions 生成配套网关')
-    parser.add_argument('--version', default='1.5.0-desktop-control.5')
+    parser.add_argument('--version', default='1.5.0-desktop-control.6')
     args = parser.parse_args()
     if os.environ.get('GITHUB_ACTIONS') != 'true':
         raise SystemExit('此入口只用于发布 CI。安装请运行 install.cmd，无需 Go 或源码构建。')

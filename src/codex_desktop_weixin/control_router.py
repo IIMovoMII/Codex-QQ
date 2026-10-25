@@ -35,7 +35,6 @@ class ControlRouter:
         self.store, self.catalog, self.backend = store, catalog, backend
         self.queue_func = queue_func
         self.availability_check = availability_check
-        self._process_started_at = time.time()
         self._bridge_scopes: set[str] = set()
         self.store.prune()
 
@@ -81,18 +80,6 @@ class ControlRouter:
         if not isinstance(message_id, str) or not 1 <= len(message_id) <= 240:
             return "入站消息缺少原始编号，未执行。"
         scope = f"{os.environ.get('CC_PROJECT','default')}|{expected}|{meta['user_id']}"
-        # A bridge restart is a new control generation for this QQ session,
-        # even when Desktop and its process identity remain unchanged. Keep
-        # the cutoff scoped so another user's ACP process is not invalidated.
-        if scope not in self._bridge_scopes:
-            try:
-                self.store.begin_bridge_session(scope, now=self._process_started_at)
-            except (OSError, sqlite3.Error):
-                # Keep the existing state and fail closed just like later
-                # event-state writes. A locked/corrupt store must not allow
-                # an untracked native mutation or crash the ACP request.
-                return '本地控制状态暂不可用，未执行这条指令；没有清空或重建已有状态。'
-            self._bridge_scopes.add(scope)
         try:
             sent_at = float(meta["sent_at_ms"]) / 1000
             gateway_ready = float(meta["connection_ready_at_ms"]) / 1000
@@ -100,6 +87,16 @@ class ControlRouter:
                 raise ValueError("invalid-event-time")
         except (KeyError, TypeError, ValueError):
             return "无法确认这条消息的发送时间，指令已作废，请重新发送。"
+        # The gateway starts/recreates its ACP child only after receiving a
+        # message. Python startup is therefore not an offline boundary: using
+        # it would reject every first message. Use the actual QQ READY epoch;
+        # Desktop identity/readiness and event receipts remain separate checks.
+        if scope not in self._bridge_scopes:
+            try:
+                self.store.begin_bridge_session(scope, now=gateway_ready)
+            except (OSError, sqlite3.Error):
+                return '本地控制状态暂不可用，未执行这条指令；没有清空或重建已有状态。'
+            self._bridge_scopes.add(scope)
         try:
             duplicate = self.store.begin(scope, message_id, sent_at)
         except (OSError, sqlite3.Error):

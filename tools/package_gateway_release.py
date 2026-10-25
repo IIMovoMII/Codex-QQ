@@ -27,7 +27,7 @@ def package(binary: Path, output_dir: Path, *, tag: str,
     if os.name != 'nt' or binary.suffix.lower() != '.exe' or not binary.is_file():
         raise ValueError('需要 Windows 网关 exe 文件')
     if not re.fullmatch(r'v1\.5\.0-desktop-control\.\d+', tag):
-        raise ValueError('发布标签必须与配套网关版本一致，例如 v1.5.0-desktop-control.5')
+        raise ValueError('发布标签必须与配套网关版本一致，例如 v1.5.0-desktop-control.6')
     if gateway_version != tag.removeprefix('v'):
         raise ValueError('网关内部版本必须与发布标签一致，拒绝生成自相矛盾的 BUILD_INFO')
     if upstream_revision != UPSTREAM_REVISION:
@@ -70,7 +70,7 @@ def main() -> int:
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--output-dir', type=Path, required=True)
     parser.add_argument('--release-tag', required=True)
-    parser.add_argument('--gateway-version', default='1.5.0-desktop-control.5')
+    parser.add_argument('--gateway-version', default='1.5.0-desktop-control.6')
     args = parser.parse_args()
     result = package(args.binary, args.output_dir, tag=args.release_tag,
                      gateway_version=args.gateway_version)

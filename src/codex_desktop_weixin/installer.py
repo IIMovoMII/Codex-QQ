@@ -55,19 +55,34 @@ def managed_hook_groups(command: str) -> dict[str, list[dict[str, Any]]]:
     }
 
 
+def _is_managed_handler(handler: Any) -> bool:
+    if not isinstance(handler, dict):
+        return False
+    command = " ".join(str(handler.get(key) or "") for key in ("command", "commandWindows", "command_windows"))
+    return MANAGED_MARKER in command.replace("_", "-").lower()
+
+
 def _is_managed_group(group: Any) -> bool:
     if not isinstance(group, dict):
         return False
     handlers = group.get("hooks")
     if not isinstance(handlers, list):
         return False
-    for handler in handlers:
-        if not isinstance(handler, dict):
+    return any(_is_managed_handler(handler) for handler in handlers)
+
+
+def _unmanaged_groups(groups: list[Any]) -> list[Any]:
+    preserved = []
+    for group in groups:
+        if not _is_managed_group(group):
+            preserved.append(group)
             continue
-        command = " ".join(str(handler.get(key) or "") for key in ("command", "commandWindows", "command_windows"))
-        if MANAGED_MARKER in command.replace("_", "-").lower():
-            return True
-    return False
+        # Users can place multiple handlers in one matcher group. Remove only
+        # our handlers, keeping their other hooks and group metadata intact.
+        handlers = [handler for handler in group["hooks"] if not _is_managed_handler(handler)]
+        if handlers:
+            preserved.append(dict(group, hooks=handlers))
+    return preserved
 
 
 def merge_hooks_document(existing: dict[str, Any] | None, command: str) -> dict[str, Any]:
@@ -82,7 +97,7 @@ def merge_hooks_document(existing: dict[str, Any] | None, command: str) -> dict[
         current = merged_hooks.get(event_name) or []
         if not isinstance(current, list):
             raise ValueError(f"hooks.json 的 {event_name} 字段不是数组，无法安全合并。")
-        preserved = [group for group in current if not _is_managed_group(group)]
+        preserved = _unmanaged_groups(current)
         merged_hooks[event_name] = preserved + additions
     document["hooks"] = merged_hooks
     return document
@@ -98,7 +113,7 @@ def remove_managed_hooks(existing: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(groups, list):
             cleaned[event_name] = groups
             continue
-        remaining = [group for group in groups if not _is_managed_group(group)]
+        remaining = _unmanaged_groups(groups)
         if remaining:
             cleaned[event_name] = remaining
     document["hooks"] = cleaned
@@ -106,18 +121,54 @@ def remove_managed_hooks(existing: dict[str, Any]) -> dict[str, Any]:
 
 
 def enable_hooks_feature(config_text: str) -> str:
+    # Keep special floats comparable for the preservation check (nan != nan).
+    expected = tomllib.loads(config_text, parse_float=lambda value: (float, value))
+    features = expected.setdefault("features", {})
+    if not isinstance(features, dict):
+        raise ValueError("config.toml 的 features 字段不是表，无法安全启用 hooks。")
+    if features.get("hooks") is True:
+        return config_text
+    features["hooks"] = True
     newline = "\r\n" if "\r\n" in config_text else "\n"
-    lines = config_text.splitlines()
+    # TOML permits Unicode line separators inside strings; only LF/CRLF end
+    # physical lines. str.splitlines() would split and rewrite those values.
+    lines = config_text.replace("\r\n", "\n").split("\n") if config_text else []
+    if config_text.endswith("\n"):
+        lines.pop()
+
+    def complete_statement(index: int) -> bool:
+        # A header-looking line can be literal text inside a multiline value.
+        # A prefix ending at a real header/boolean assignment parses completely.
+        try:
+            tomllib.loads("\n".join(lines[:index + 1]))
+        except tomllib.TOMLDecodeError:
+            return False
+        return True
+
+    def checked_result(result: list[str]) -> str:
+        updated = newline.join(result) + (newline if config_text.endswith(("\n", "\r")) else "")
+        if tomllib.loads(updated, parse_float=lambda value: (float, value)) != expected:
+            raise ValueError("无法只修改 features.hooks，原配置已保留；请检查 config.toml。")
+        return updated
+
     section_start: int | None = None
     section_end = len(lines)
     for index, line in enumerate(lines):
         stripped = line.strip()
-        if stripped.lower() == "[features]":
+        if not stripped.startswith("["):
+            continue
+        try:
+            header = tomllib.loads(stripped)
+        except tomllib.TOMLDecodeError:
+            continue
+        if not complete_statement(index):
+            continue
+        if header == {"features": {}}:
             if section_start is not None:
                 raise ValueError("config.toml 中存在重复的 [features]。")
             section_start = index
             continue
-        if section_start is not None and index > section_start and stripped.startswith("["):
+        if section_start is not None:
             section_end = index
             break
 
@@ -126,29 +177,31 @@ def enable_hooks_feature(config_text: str) -> str:
         if result and result[-1].strip():
             result.append("")
         result.extend(["[features]", "hooks = true"])
-        return newline.join(result) + (newline if config_text.endswith(("\n", "\r")) else "")
+        return checked_result(result)
 
     matches: list[int] = []
     for index in range(section_start + 1, section_end):
-        if lines[index].lstrip().startswith("#"):
+        if "=" not in lines[index] or lines[index].lstrip().startswith("#"):
             continue
-        if lines[index].split("#", 1)[0].strip().lower().startswith("hooks"):
-            left = lines[index].split("=", 1)[0].strip().lower() if "=" in lines[index] else ""
-            if left == "hooks":
-                matches.append(index)
+        left = lines[index].split("=", 1)[0].strip()
+        try:
+            key = tomllib.loads(left + " = true")
+        except tomllib.TOMLDecodeError:
+            continue
+        if key == {"hooks": True} and complete_statement(index):
+            matches.append(index)
     if len(matches) > 1:
         raise ValueError("config.toml 的 [features] 中存在重复 hooks 设置。")
     if matches:
         index = matches[0]
-        comment = ""
-        if "#" in lines[index]:
-            comment = " " + lines[index].split("#", 1)[1].strip()
-            comment = " #" + comment.strip()
-        indent = lines[index][: len(lines[index]) - len(lines[index].lstrip())]
-        lines[index] = f"{indent}hooks = true{comment}"
+        key, value = lines[index].split("=", 1)
+        body, marker, comment = value.partition("#")
+        leading = body[: len(body) - len(body.lstrip())]
+        trailing = body[len(body.rstrip()):]
+        lines[index] = key + "=" + leading + "true" + trailing + marker + comment
     else:
         lines.insert(section_end, "hooks = true")
-    return newline.join(lines) + (newline if config_text.endswith(("\n", "\r")) else "")
+    return checked_result(lines)
 
 
 def _sha256(data: bytes) -> str:

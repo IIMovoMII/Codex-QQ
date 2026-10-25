@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: '新发布标签，例如 v1.5.0-desktop-control.5；已存在的标签会拒绝覆盖'
+        description: '新发布标签，例如 v1.5.0-desktop-control.6；已存在的标签会拒绝覆盖'
         required: true
-        default: v1.5.0-desktop-control.5
+        default: v1.5.0-desktop-control.6
         type: string
 
 permissions:
@@ -22,7 +22,7 @@ jobs:
     runs-on: windows-latest
     env:
       PYTHONUTF8: '1'
-      GATEWAY_VERSION: 1.5.0-desktop-control.5
+      GATEWAY_VERSION: 1.5.0-desktop-control.6
       RELEASE_TAG: ${{ inputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
@@ -63,7 +63,7 @@ jobs:
 
           - 仅包含本项目适配的 ACP 与 QQ 通道。
           - 来源、上游固定提交、补丁说明和二进制 SHA-256 在压缩包内。
-          - 安装请运行仓库内的 install.cmd；无需 Go 或源码构建。
+          - 安装请运行仓库内的 install.cmd。
           - 这是 Codex-QQ 的配套组件，不是未打补丁的上游 cc-connect.exe。
           "@
           Set-Content -Path dist/RELEASE_NOTES.md -Value $notes -Encoding utf8

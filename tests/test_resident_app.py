@@ -8,6 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, Mock
 
 PACKAGE = Path(__file__).resolve().parents[1] / 'src/codex_desktop_weixin'
@@ -210,7 +211,13 @@ class LifecycleTests(unittest.TestCase):
         self.assertFalse(monitor._standby())
 
     def test_launch_uses_shared_explorer_broker_and_no_codex_launch(self):
-        with patch('resident_app.subprocess.Popen') as spawn:
+        executable = self.app.data_dir / 'CodexQQ助手.exe'
+        executable.touch()
+        with patch('resident_app.os', SimpleNamespace(name='nt')), \
+             patch('resident_app.APP_EXE', executable), \
+             patch('resident_app.persist_native_endpoint'), \
+             patch('resident_app.subprocess.CREATE_NO_WINDOW', 0x08000000, create=True), \
+             patch('resident_app.subprocess.Popen') as spawn:
             spawn.return_value.pid = 42
             result = launch_app(self.app.codex_home, self.app.data_dir)
         args, kwargs = spawn.call_args

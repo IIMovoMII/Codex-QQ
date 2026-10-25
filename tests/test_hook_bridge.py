@@ -13,8 +13,10 @@ PACKAGE_DIR = Path(__file__).resolve().parents[1] / "src" / "codex_desktop_weixi
 sys.path.insert(0, str(PACKAGE_DIR))
 
 from hook_bridge import (
+    MAX_HOOK_INPUT_BYTES,
     collect_hook_event,
     hook_event_to_signals,
+    hook_main,
     request_runtime_autostart,
     sanitize_hook_payload,
     should_autostart_runtime,
@@ -49,6 +51,83 @@ class HookBridgeTests(unittest.TestCase):
             path = collect_hook_event('{"hook_event_name":"Stop","session_id":"s","turn_id":"t"}', data_dir=Path(temporary))
             self.assertTrue(path.exists())
             self.assertEqual(len(list((Path(temporary) / "spool" / "incoming").glob("*.json"))), 1)
+
+    def test_collector_accepts_limit_but_rejects_oversized_input_before_parsing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = '{"hook_event_name":"Stop"}'
+            raw = payload + " " * (MAX_HOOK_INPUT_BYTES - len(payload))
+            path = collect_hook_event(raw, data_dir=root)
+            self.assertTrue(path.exists())
+            with patch("hook_bridge.json.loads") as loads, patch("hook_bridge.atomic_write_json") as write:
+                with self.assertRaisesRegex(ValueError, "size limit"):
+                    collect_hook_event(raw + "x", data_dir=root)
+            loads.assert_not_called()
+            write.assert_not_called()
+            self.assertEqual(len(list((root / "spool" / "incoming").glob("*.json"))), 1)
+
+    def test_collector_size_limit_counts_utf8_bytes(self) -> None:
+        # Character count is below the limit, but this is more than 1 MiB in
+        # UTF-8. Tool outputs and assistant messages often contain Chinese.
+        raw = json.dumps({"hook_event_name": "Stop", "ignored": "中" * (MAX_HOOK_INPUT_BYTES // 3)}, ensure_ascii=False)
+        self.assertLess(len(raw), MAX_HOOK_INPUT_BYTES)
+        with tempfile.TemporaryDirectory() as temporary, patch("hook_bridge.json.loads") as loads:
+            with self.assertRaisesRegex(ValueError, "size limit"):
+                collect_hook_event(raw, data_dir=Path(temporary))
+            self.assertEqual(list(Path(temporary).iterdir()), [])
+        loads.assert_not_called()
+
+    def test_hook_reads_stdin_with_a_bound_and_keeps_stop_response(self) -> None:
+        class BoundedInput(io.StringIO):
+            def read(self, size: int = -1) -> str:
+                self.requested_size = size
+                if size < 0:
+                    raise AssertionError("unbounded hook read")
+                return super().read(size)
+
+        incoming = BoundedInput('{"hook_event_name":"Stop"}')
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary, patch("hook_bridge.default_data_dir", return_value=Path(temporary)), patch(
+            "hook_bridge.sys.stdin", incoming
+        ), patch("hook_bridge.sys.stdout", output), patch("hook_bridge.request_runtime_autostart"):
+            self.assertEqual(hook_main(), 0)
+            self.assertEqual(len(list((Path(temporary) / "spool" / "incoming").glob("*.json"))), 1)
+        self.assertEqual(incoming.requested_size, MAX_HOOK_INPUT_BYTES + 1)
+        self.assertEqual(json.loads(output.getvalue()), {"continue": True})
+
+    def test_oversized_binary_hook_does_not_parse_collect_or_launch(self) -> None:
+        # A valid prefix followed by extra input must be rejected in full,
+        # never accepted as a truncated JSON event.
+        raw = b'{"hook_event_name":"Stop"}'
+        raw += b" " * (MAX_HOOK_INPUT_BYTES - len(raw)) + b"x"
+        incoming = io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8")
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary, patch("hook_bridge.default_data_dir", return_value=Path(temporary)), patch(
+            "hook_bridge.sys.stdin", incoming
+        ), patch("hook_bridge.sys.stdout", output), patch("hook_bridge.json.loads") as loads, patch(
+            "hook_bridge.collect_hook_event"
+        ) as collect, patch("hook_bridge.request_runtime_autostart") as launch, patch("endpoint_hint.persist_native_endpoint") as hint:
+            self.assertEqual(hook_main(), 0)
+            self.assertEqual(list((Path(temporary) / "spool" / "incoming").glob("*.json")), [])
+            diagnostic = (Path(temporary) / "logs" / "autostart.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"error_type": "ValueError"', diagnostic)
+            loads.assert_not_called()
+        collect.assert_not_called()
+        launch.assert_not_called()
+        hint.assert_not_called()
+        self.assertEqual(json.loads(output.getvalue()), {"continue": True})
+
+    def test_hook_stdin_error_cannot_break_turn_or_leak_contents(self) -> None:
+        incoming = io.StringIO()
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary, patch("hook_bridge.default_data_dir", return_value=Path(temporary)), patch(
+            "hook_bridge.sys.stdin", incoming
+        ), patch.object(incoming, "read", side_effect=OSError("private payload")), patch("hook_bridge.sys.stdout", output):
+            self.assertEqual(hook_main(), 0)
+            diagnostic = (Path(temporary) / "logs" / "autostart.jsonl").read_text(encoding="utf-8")
+            self.assertNotIn("private payload", diagnostic)
+            self.assertIn('"error_type": "OSError"', diagnostic)
+        self.assertEqual(json.loads(output.getvalue()), {"continue": True})
 
     def test_runtime_autostart_only_for_desktop_hooks_when_needed(self) -> None:
         self.assertTrue(

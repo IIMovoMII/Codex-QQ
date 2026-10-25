@@ -17,8 +17,9 @@ RELEASE_TAG = 'v1.5.0-desktop-control.5'
 ASSET_NAME = f'codex-qq-gateway-windows-x64-{RELEASE_TAG}.zip'
 CHECKSUM_NAME = 'SHA256SUMS.txt'
 UPSTREAM_REVISION = '17c61062c2f9ce9bcdd45a2082e491f9743a2770'
-# The immutable, already-published .5 binary. A future release must explicitly
-# update this pin; the downloaded checksum is not its own trust anchor.
+# The immutable, already-published .5 binary. Keep this pin until .6 is
+# published and its asset hash has been independently verified; a downloaded
+# checksum is not its own trust anchor.
 BINARY_SHA256 = '05c7db95eb3454686e1d2833a109e29d030146e610263e40cfd2809ca5389297'
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 

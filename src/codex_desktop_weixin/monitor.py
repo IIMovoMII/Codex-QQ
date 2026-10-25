@@ -147,15 +147,19 @@ class DesktopMonitor:
         path: Path,
         *,
         target_turn_id: str | None = None,
+        hook_turn_id: str | None = None,
         not_before: datetime | None = None,
-    ) -> None:
+    ) -> bool:
+        """Drain new records and report this hook turn's observed terminal event."""
         try:
             if is_desktop_rollout(path) is not True:
-                return
+                return False
         except (FileNotFoundError, PermissionError, OSError):
-            return
+            return False
         # Drain a bounded backlog immediately.  Ordinarily this loop runs once;
         # multiple iterations only occur after startup/race recovery.
+        target_seen = target_turn_id is None
+        hook_terminal_seen = False
         for _ in range(8):
             try:
                 cursor = self.tailer.cursor_for(path)
@@ -169,13 +173,18 @@ class DesktopMonitor:
                 cursor = self.tailer.cursor_for(path)
                 after = cursor.offset if cursor is not None else before
             except (FileNotFoundError, PermissionError, OSError):
-                return
-            if target_turn_id:
-                signals = [
-                    signal
-                    for signal in signals
-                    if signal.kind == SignalKind.SESSION_STARTED or signal.turn_id == target_turn_id
-                ]
+                return hook_terminal_seen
+            if not target_seen:
+                # A new cursor may read history before the hook turn and newer
+                # fast turns after it. The cursor advances across this batch,
+                # so discard only preceding history and retain later signals.
+                selected = []
+                for signal in signals:
+                    if signal.turn_id == target_turn_id:
+                        target_seen = True
+                    if target_seen or signal.kind == SignalKind.SESSION_STARTED:
+                        selected.append(signal)
+                signals = selected
             if not_before is not None:
                 signals = [
                     signal
@@ -188,6 +197,11 @@ class DesktopMonitor:
             except Exception:
                 self.tailer.restore_cursor(path, previous_cursor)
                 raise
+            hook_terminal_seen |= any(
+                signal.turn_id == hook_turn_id
+                and signal.kind in (SignalKind.TURN_COMPLETED, SignalKind.TURN_ABORTED)
+                for signal in signals
+            )
             if after <= before:
                 break
             try:
@@ -195,25 +209,33 @@ class DesktopMonitor:
                     break
             except OSError:
                 break
+        return hook_terminal_seen
 
-    def _register_from_hook(self, transcript: Path, turn_id: str | None) -> None:
+    def _register_from_hook(self, transcript: Path, turn_id: str | None) -> bool:
         try:
             desktop_rollout = is_desktop_rollout(transcript)
         except (FileNotFoundError, PermissionError, OSError):
-            return
+            return False
         if desktop_rollout is not True:
-            return
-        if not self.tailer.is_known(transcript):
+            return False
+        recovering_history = not self.tailer.is_known(transcript)
+        if recovering_history:
             # SessionStart/SessionEnd have no turn id.  Do not advance an unknown
             # transcript here: a queued UserPromptSubmit may still need to recover
             # a complete fast turn from the same file.
             if not turn_id:
-                return
+                return False
             try:
                 self.tailer.register_with_lookback(transcript)
             except (FileNotFoundError, PermissionError, OSError):
-                return
-        self._read_transcript(transcript, target_turn_id=turn_id)
+                return False
+        # A known cursor already excludes history. Its unread records may
+        # finish the previous turn before this hook's turn begins.
+        return self._read_transcript(
+            transcript,
+            target_turn_id=turn_id if recovering_history else None,
+            hook_turn_id=turn_id,
+        )
 
     def _process_spool_file(self, path: Path) -> None:
         try:
@@ -247,16 +269,16 @@ class DesktopMonitor:
                     return
             turn_id = str(event.get("turn_id") or "") or None
             hook_signals = hook_event_to_signals(event)
-            # UserPromptSubmit is the logical beginning of a turn.  It must be
-            # applied first when the rollout has already raced all the way to a
-            # terminal record; otherwise a late hook could reopen a completed turn.
-            prompt_started = event.get("hook_event_name") == "UserPromptSubmit"
-            if prompt_started:
-                self._apply(hook_signals)
+            native_terminal = False
             if transcript is not None:
-                self._register_from_hook(transcript, turn_id)
-            if not prompt_started:
-                self._apply(hook_signals)
+                native_terminal = self._register_from_hook(transcript, turn_id)
+            # Drain authoritative records before a new prompt can retire the
+            # preceding turn. If this hook's turn already ended in the native
+            # transcript, delayed hooks must not reopen it.
+            if native_terminal:
+                hook_signals = [signal for signal in hook_signals
+                                if signal.kind in (SignalKind.SESSION_STARTED, SignalKind.SESSION_ENDED)]
+            self._apply(hook_signals)
             destination = self.paths["processed"] / path.name
         except Exception:
             destination = self.paths["failed"] / path.name

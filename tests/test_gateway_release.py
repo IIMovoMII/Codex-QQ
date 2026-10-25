@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -35,9 +37,10 @@ class GatewayReleaseTests(unittest.TestCase):
             binary = root / 'cc-connect-desktop-control.exe'
             binary.write_bytes(b'fake-verified-binary')
             output = root / 'dist'
-            result = package_gateway_release.package(
-                binary, output, tag='v1.5.0-desktop-control.5',
-                gateway_version='1.5.0-desktop-control.5')
+            with patch.object(package_gateway_release, 'os', SimpleNamespace(name='nt', environ=os.environ)):
+                result = package_gateway_release.package(
+                    binary, output, tag='v1.5.0-desktop-control.6',
+                    gateway_version='1.5.0-desktop-control.6')
             archive = Path(result['archive'])
             self.assertEqual(result['binary_sha256'], hashlib.sha256(binary.read_bytes()).hexdigest())
             with zipfile.ZipFile(archive) as bundle:
@@ -46,20 +49,30 @@ class GatewayReleaseTests(unittest.TestCase):
                     'THIRD_PARTY_NOTICES.md', 'CC_CONNECT_ADAPTER.md'})
                 info = json.loads(bundle.read('BUILD_INFO.json'))
                 self.assertEqual(info['upstream_revision'], package_gateway_release.UPSTREAM_REVISION)
-                self.assertEqual(info['release_tag'], 'v1.5.0-desktop-control.5')
+                self.assertEqual(info['release_tag'], 'v1.5.0-desktop-control.6')
 
     def test_package_rejects_overwrite_and_unverified_tag(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             binary = root / 'gateway.exe'
             binary.write_bytes(b'fixture')
-            with self.assertRaises(ValueError):
-                package_gateway_release.package(binary, root / 'dist',
-                                                tag='v0.1.0', gateway_version='1.5.0-desktop-control.5')
-            with self.assertRaises(ValueError):
-                package_gateway_release.package(binary, root / 'dist',
-                                                tag='v1.5.0-desktop-control.6',
-                                                gateway_version='1.5.0-desktop-control.5')
+            with patch.object(package_gateway_release, 'os', SimpleNamespace(name='nt', environ=os.environ)):
+                with self.assertRaisesRegex(ValueError, '发布标签'):
+                    package_gateway_release.package(binary, root / 'dist',
+                                                    tag='v0.1.0', gateway_version='1.5.0-desktop-control.6')
+                with self.assertRaisesRegex(ValueError, '内部版本'):
+                    package_gateway_release.package(binary, root / 'dist',
+                                                    tag='v1.5.0-desktop-control.6',
+                                                    gateway_version='1.5.0-desktop-control.5')
+                output = root / 'dist'
+                output.mkdir()
+                existing = output / 'codex-qq-gateway-windows-x64-v1.5.0-desktop-control.6.zip'
+                existing.write_bytes(b'preserved')
+                with self.assertRaisesRegex(ValueError, '拒绝覆盖'):
+                    package_gateway_release.package(binary, output,
+                                                    tag='v1.5.0-desktop-control.6',
+                                                    gateway_version='1.5.0-desktop-control.6')
+                self.assertEqual(existing.read_bytes(), b'preserved')
 
     def test_verified_gateway_is_reused_without_network(self):
         with tempfile.TemporaryDirectory() as temp:

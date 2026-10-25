@@ -214,28 +214,13 @@ class BridgeProcessEncodingTests(unittest.TestCase):
                 "PYTHONUTF8": "0", "PYTHONIOENCODING": "gbk",
                 "CC_SESSION_KEY": "qqbot:encoding-test", "CC_DATA_DIR": directory,
             })
-            # Start the ACP bridge before stamping/sending the test events.
-            # This mirrors the real gateway: a prompt arriving after the
-            # bridge generation is ready is valid, while a pre-start buffered
-            # event must be discarded by the restart cutoff.
+            # The gateway receives the QQ event before lazily starting its ACP
+            # child. Preserve that original timestamp through the cold start.
             process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=subprocess.PIPE, env=env)
             try:
-                process.stdin.write((json.dumps({"jsonrpc": "2.0", "id": 0,
-                    "method": "session/new", "params": {}}) + "\n").encode("utf-8"))
-                process.stdin.flush()
-                handshake = process.stdout.readline()
-                live_time = time.time() * 1000
-                for request in requests:
-                    request["params"]["_meta"]["cc_connect"]["sent_at_ms"] = live_time
-                live_data = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in requests).encode("utf-8")
-                process.stdin.write(live_data)
-                process.stdin.close()
-                output = handshake + process.stdout.read()
-                error = process.stderr.read()
-                returncode = process.wait(timeout=15)
-                process.stdout.close()
-                process.stderr.close()
+                output, error = process.communicate(data, timeout=15)
+                returncode = process.returncode
             except BaseException:
                 process.kill()
                 process.wait(timeout=5)

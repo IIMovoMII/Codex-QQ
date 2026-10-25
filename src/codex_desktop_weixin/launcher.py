@@ -22,10 +22,9 @@ from rollout import is_desktop_rollout
 CODEX_APP_TARGET = r"shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App"
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PROCESS_TERMINATE = 0x0001
+SYNCHRONIZE = 0x100000
 PROCESS_IDENTITY_VERSION = 1
-# Windows FILETIME is precise enough that a multi-second tolerance can confuse
-# a newly reused PID with the old managed process.
-PROCESS_START_TIME_TOLERANCE_SECONDS = 0.25
+ERROR_INVALID_PARAMETER = 87
 WINDOWS_EPOCH_OFFSET_SECONDS = 11644473600
 
 
@@ -53,6 +52,17 @@ def _query_process_identity(pid: int) -> dict[str, Any]:
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = [ctypes.c_void_p]
     close_handle.restype = ctypes.c_int
+    handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return {"process_image": "", "process_start_time": None}
+    try:
+        return _query_process_handle_identity(kernel32, handle)
+    finally:
+        close_handle(handle)
+
+
+def _query_process_handle_identity(kernel32: Any, handle: Any) -> dict[str, Any]:
+    """Read identity from the same handle that an eventual stop will use."""
     query_path = kernel32.QueryFullProcessImageNameW
     query_path.argtypes = [ctypes.c_void_p, ctypes.c_ulong, wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
     query_path.restype = ctypes.c_int
@@ -66,33 +76,27 @@ def _query_process_identity(pid: int) -> dict[str, Any]:
     ]
     get_times.restype = ctypes.c_int
 
-    handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
-    if not handle:
-        return {"process_image": "", "process_start_time": None}
-    try:
-        image = ""
-        size = wintypes.DWORD(32768)
-        buffer = ctypes.create_unicode_buffer(size.value)
-        if query_path(handle, 0, buffer, ctypes.byref(size)):
-            image = buffer.value
+    image = ""
+    size = wintypes.DWORD(32768)
+    buffer = ctypes.create_unicode_buffer(size.value)
+    if query_path(handle, 0, buffer, ctypes.byref(size)):
+        image = buffer.value
 
-        creation = wintypes.FILETIME()
-        exit_time = wintypes.FILETIME()
-        kernel_time = wintypes.FILETIME()
-        user_time = wintypes.FILETIME()
-        start_time: float | None = None
-        if get_times(
-            handle,
-            ctypes.byref(creation),
-            ctypes.byref(exit_time),
-            ctypes.byref(kernel_time),
-            ctypes.byref(user_time),
-        ):
-            ticks = (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
-            start_time = ticks / 10_000_000 - WINDOWS_EPOCH_OFFSET_SECONDS
-        return {"process_image": image, "process_start_time": start_time}
-    finally:
-        close_handle(handle)
+    creation = wintypes.FILETIME()
+    exit_time = wintypes.FILETIME()
+    kernel_time = wintypes.FILETIME()
+    user_time = wintypes.FILETIME()
+    start_time: float | None = None
+    if get_times(
+        handle,
+        ctypes.byref(creation),
+        ctypes.byref(exit_time),
+        ctypes.byref(kernel_time),
+        ctypes.byref(user_time),
+    ):
+        ticks = (int(creation.dwHighDateTime) << 32) | int(creation.dwLowDateTime)
+        start_time = ticks / 10_000_000 - WINDOWS_EPOCH_OFFSET_SECONDS
+    return {"process_image": image, "process_start_time": start_time}
 
 
 def _capture_process_identity(pid: int) -> dict[str, Any]:
@@ -108,13 +112,16 @@ def _capture_process_identity(pid: int) -> dict[str, Any]:
 
 def _process_identity_matches(state: dict[str, Any], pid: int) -> bool:
     """Check that a live PID is still the exact process recorded in state."""
+    return _identity_matches(state, _query_process_identity(pid))
+
+
+def _identity_matches(state: dict[str, Any], actual: dict[str, Any]) -> bool:
     try:
         if int(state.get("identity_version", 0)) != PROCESS_IDENTITY_VERSION:
             return False
     except (TypeError, ValueError):
         return False
 
-    actual = _query_process_identity(pid)
     expected_image = str(state.get("process_image") or "")
     actual_image = str(actual.get("process_image") or "")
     if not expected_image or not actual_image:
@@ -128,7 +135,9 @@ def _process_identity_matches(state: dict[str, Any], pid: int) -> bool:
         try:
             if expected_start is None or actual_start is None:
                 return False
-            if abs(float(expected_start) - float(actual_start)) > PROCESS_START_TIME_TOLERANCE_SECONDS:
+            # Both values come from the same FILETIME conversion; JSON retains
+            # the float exactly. A tolerance would accept a rapidly reused PID.
+            if float(expected_start) != float(actual_start):
                 return False
         except (TypeError, ValueError):
             return False
@@ -153,7 +162,10 @@ def _pid_alive(pid: int) -> bool:
     close_handle.restype = ctypes.c_int
     handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
-        return False
+        # Access denied or another probe failure is not evidence of exit.
+        # Treat the PID as possibly alive so teardown preserves its ownership
+        # record rather than starting a duplicate or deleting unknown state.
+        return ctypes.get_last_error() != ERROR_INVALID_PARAMETER
     close_handle(handle)
     return True
 
@@ -254,10 +266,8 @@ def _send_windows_ctrl_break(pid: int) -> None:
         helper.kill()
 
 
-def _force_terminate_process(pid: int) -> None:
-    if os.name != "nt":
-        os.kill(pid, signal.SIGKILL)
-        return
+def _stop_windows_process(pid: int, state: dict[str, Any], timeout_seconds: float) -> str:
+    """Keep identity verification, termination and exit confirmation on one handle."""
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     open_process = kernel32.OpenProcess
     open_process.argtypes = [ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong]
@@ -268,12 +278,42 @@ def _force_terminate_process(pid: int) -> None:
     close_handle = kernel32.CloseHandle
     close_handle.argtypes = [ctypes.c_void_p]
     close_handle.restype = ctypes.c_int
-    handle = open_process(PROCESS_TERMINATE, False, pid)
+    wait = kernel32.WaitForSingleObject
+    wait.argtypes = [ctypes.c_void_p, ctypes.c_ulong]
+    wait.restype = ctypes.c_ulong
+    handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, False, pid)
     if not handle:
         raise ctypes.WinError(ctypes.get_last_error())
     try:
-        if not terminate_process(handle, 1):
+        if not _identity_matches(state, _query_process_handle_identity(kernel32, handle)):
+            return "managed-process-identity-changed"
+        status = wait(handle, 0)
+        if status == 0:
+            return "graceful"
+        if status != 258:
             raise ctypes.WinError(ctypes.get_last_error())
+        # Retain the verified process object while the helper attaches by PID.
+        try:
+            _send_windows_ctrl_break(pid)
+        except OSError:
+            if wait(handle, 0) == 0:
+                return "graceful"
+            raise
+        status = wait(handle, max(0, int(timeout_seconds * 1000)))
+        if status == 0:
+            return "graceful"
+        if status != 258:
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not terminate_process(handle, 1):
+            if wait(handle, 0) == 0:
+                return "graceful_during_force_race"
+            raise ctypes.WinError(ctypes.get_last_error())
+        status = wait(handle, 2000)
+        if status == 0:
+            return "forced_after_graceful_timeout"
+        if status == 258:
+            return "force_timeout"
+        raise ctypes.WinError(ctypes.get_last_error())
     finally:
         close_handle(handle)
 
@@ -315,9 +355,15 @@ def _socket_is_reachable(path: Path) -> bool | None:
     family = getattr(socket, "AF_UNIX", None)
     if family is None:
         return None
-    stream = socket.socket(family, socket.SOCK_STREAM)
-    stream.settimeout(0.3)
     try:
+        stream = socket.socket(family, socket.SOCK_STREAM)
+    except OSError:
+        return None
+    try:
+        try:
+            stream.settimeout(0.3)
+        except OSError:
+            return None
         stream.connect(str(path))
         return True
     except OSError:
@@ -407,6 +453,9 @@ def cleanup_stale_cc_connect_socket(data_dir: Path) -> dict[str, Any]:
     reachable = _socket_is_reachable(socket_path)
     if reachable is True:
         return {"socket_cleanup": "skipped_reachable", "socket_path": str(socket_path)}
+    if reachable is None:
+        return {"socket_cleanup": "failed", "socket_path": str(socket_path),
+                "socket_error": "local socket support unavailable; endpoint preserved"}
     try:
         _unlink_socket_path(socket_path)
     except OSError as error:
@@ -613,11 +662,22 @@ def stop_cc_connect_service(data_dir: Path, *, timeout_seconds: float = 8.0) -> 
             "reason": "not_running",
             **cleanup_stale_cc_connect_socket(data_dir),
         }
+    if os.name == "nt":
+        try:
+            reason = _stop_windows_process(pid, state, timeout_seconds)
+        except OSError as error:
+            return {"cc_connect_stopped": False, "cc_connect_pid": pid, "reason": str(error)}
+        stopped = reason in ("graceful", "graceful_during_force_race", "forced_after_graceful_timeout")
+        if not stopped:
+            return {"cc_connect_stopped": False, "cc_connect_pid": pid, "reason": reason}
+        try:
+            _service_state_path(data_dir).unlink()
+        except OSError:
+            pass
+        return {"cc_connect_stopped": True, "cc_connect_pid": pid, "reason": reason,
+                **cleanup_stale_cc_connect_socket(data_dir)}
     try:
-        if os.name == "nt":
-            _send_windows_ctrl_break(pid)
-        else:
-            os.kill(pid, signal.SIGTERM)
+        os.kill(pid, signal.SIGTERM)
     except OSError as error:
         return {"cc_connect_stopped": False, "cc_connect_pid": pid, "reason": str(error)}
     deadline = time.monotonic() + timeout_seconds
@@ -641,7 +701,7 @@ def stop_cc_connect_service(data_dir: Path, *, timeout_seconds: float = 8.0) -> 
         return {"cc_connect_stopped": False, "cc_connect_pid": pid,
                 "reason": "managed-process-identity-changed"}
     try:
-        _force_terminate_process(pid)
+        os.kill(pid, signal.SIGKILL)
     except OSError as error:
         if not _pid_alive(pid):
             try:

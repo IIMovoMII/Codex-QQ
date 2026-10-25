@@ -71,6 +71,30 @@ class AutostartTests(unittest.TestCase):
             self.assertIsNotNone(lock := _acquire_autostart_lock(root))
             os.close(lock[0])
 
+    def test_competing_helper_cannot_enter_startup_while_lock_is_owned(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            lock = _acquire_autostart_lock(root)
+            self.assertIsNotNone(lock)
+            try:
+                # Exercise the helper entry point in another process, with
+                # every possible service launch replaced by a failing stub.
+                code = "\n".join([
+                    "import sys",
+                    f"sys.path.insert(0, {str(PACKAGE_DIR)!r})",
+                    "from pathlib import Path",
+                    "from unittest.mock import patch",
+                    "from cli import command_ensure_runtime",
+                    "root = Path(sys.argv[1])",
+                    "with patch('cli.wait_for_codex_desktop', side_effect=AssertionError('entered detection')), patch('cli.start_cc_connect_service', side_effect=AssertionError('started gateway')), patch('cli.start_background_monitor', side_effect=AssertionError('started monitor')):",
+                    "    raise SystemExit(command_ensure_runtime(root / '.codex', root, wait_seconds=0))",
+                ])
+                contender = subprocess.run([sys.executable, "-c", code, str(root)], capture_output=True, text=True, timeout=10)
+                self.assertEqual(contender.returncode, 0, contender.stderr)
+                self.assertEqual(self.logs(root)[-1]["status"], "lock_busy")
+            finally:
+                os.close(lock[0])
+
     def test_shadow_mode_starts_monitor_without_cc_connect(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

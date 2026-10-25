@@ -17,6 +17,7 @@ sys.path.insert(0, str(PACKAGE_DIR))
 from monitor import DesktopMonitor, MonitorConfig
 from models import Signal, SignalKind
 from process_watch import ProcessStatus
+from state_machine import MAX_RETAINED_TERMINAL_TURNS
 from winwatch import DirectoryChange
 
 
@@ -58,6 +59,93 @@ def session_meta(session_id: str, *, source: str = "vscode") -> str:
 
 
 class MonitorRaceTests(unittest.TestCase):
+    def test_hook_lookback_preserves_later_fast_turns(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session_id = "66666666-6666-6666-6666-666666666666"
+            monitor = DesktopMonitor(MonitorConfig(codex_home=root / "codex", data_dir=root / "runtime"))
+            transcript = monitor.session_root / f"rollout-{session_id}.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text(
+                session_meta(session_id)
+                + record({"type": "task_started", "turn_id": "historical"})
+                + record({"type": "task_complete", "turn_id": "historical"})
+                + record({"type": "task_started", "turn_id": "first"})
+                + record({"type": "task_complete", "turn_id": "first"})
+                + record({"type": "task_started", "turn_id": "second"})
+                + record({"type": "task_complete", "turn_id": "second"}),
+                encoding="utf-8",
+            )
+            for turn in ("first", "second"):
+                spool = monitor.paths["incoming"] / f"{turn}.json"
+                spool.write_text(json.dumps({
+                    "hook_event_name": "UserPromptSubmit", "session_id": session_id,
+                    "turn_id": turn, "transcript_path": str(transcript),
+                    "observed_at": "2026-08-23T00:00:01Z",
+                }), encoding="utf-8")
+                monitor._process_spool_file(spool)
+            rows = [json.loads(line) for line in monitor.notifier.log_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([(row["turn_id"], row["state"]) for row in rows],
+                             [("first", "completed"), ("second", "completed")])
+            self.assertNotIn((session_id, "historical"), monitor.machine.turns)
+            self.assertEqual(monitor.machine.active_runtimes(), [])
+
+    def test_next_prompt_hook_cannot_hide_previous_turn_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session_id = "77777777-7777-7777-7777-777777777777"
+            monitor = DesktopMonitor(MonitorConfig(codex_home=root / "codex", data_dir=root / "runtime"))
+            transcript = monitor.session_root / f"rollout-{session_id}.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text(session_meta(session_id)
+                                  + record({"type": "task_started", "turn_id": "first"}), encoding="utf-8")
+            monitor.tailer.register_from_start(transcript)
+            monitor._read_transcript(transcript)
+            with transcript.open("a", encoding="utf-8") as stream:
+                stream.write(record({"type": "task_complete", "turn_id": "first"})
+                             + record({"type": "task_started", "turn_id": "second"})
+                             + record({"type": "task_complete", "turn_id": "second"}))
+            spool = monitor.paths["incoming"] / "next-prompt.json"
+            spool.write_text(json.dumps({
+                "hook_event_name": "UserPromptSubmit", "session_id": session_id,
+                "turn_id": "second", "transcript_path": str(transcript),
+                "observed_at": "2026-08-23T00:00:01Z",
+            }), encoding="utf-8")
+            monitor._process_spool_file(spool)
+            rows = [json.loads(line) for line in monitor.notifier.log_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([(row["turn_id"], row["state"]) for row in rows],
+                             [("first", "completed"), ("second", "completed")])
+            self.assertEqual(monitor.machine.active_runtimes(), [])
+
+    def test_late_hook_cannot_reopen_terminal_evicted_during_large_backlog(self) -> None:
+        for known_cursor in (False, True):
+            for event_name in ("UserPromptSubmit", "Stop", "PermissionRequest"):
+                with self.subTest(known_cursor=known_cursor, event=event_name), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    session_id = "88888888-8888-8888-8888-888888888888"
+                    monitor = DesktopMonitor(MonitorConfig(codex_home=root / "codex", data_dir=root / "runtime"))
+                    transcript = monitor.session_root / f"rollout-{session_id}.jsonl"
+                    transcript.parent.mkdir(parents=True)
+                    transcript.write_text(session_meta(session_id), encoding="utf-8")
+                    if known_cursor:
+                        monitor.tailer.register_at_end(transcript)
+                    with transcript.open("a", encoding="utf-8") as stream:
+                        for index in range(MAX_RETAINED_TERMINAL_TURNS + 1):
+                            stream.write(record({"type": "task_started", "turn_id": str(index)})
+                                         + record({"type": "task_complete", "turn_id": str(index)}))
+                    spool = monitor.paths["incoming"] / "delayed-hook.json"
+                    spool.write_text(json.dumps({
+                        "hook_event_name": event_name, "session_id": session_id,
+                        "turn_id": "0", "transcript_path": str(transcript),
+                        "observed_at": "2026-08-23T00:00:01Z",
+                    }), encoding="utf-8")
+                    with patch.object(monitor, "_emit") as emit:
+                        monitor._process_spool_file(spool)
+                    completed = [note for call in emit.call_args_list for note in call.args[0]]
+                    self.assertEqual(len(completed), MAX_RETAINED_TERMINAL_TURNS + 1)
+                    self.assertNotIn((session_id, "0"), monitor.machine.turns)
+                    self.assertEqual(monitor.machine.active_runtimes(), [])
+
     def test_transcript_cursor_is_replayed_when_apply_fails(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

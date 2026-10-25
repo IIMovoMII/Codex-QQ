@@ -125,7 +125,7 @@ index 0000000..36e8bd5
 +	oldBase := apiBaseProduction
 +	apiBaseProduction = server.URL
 +	defer func() { apiBaseProduction = oldBase }()
-+	p := &Platform{allowFrom: testMemberID, token: "test-token", tokenExpiry: time.Now().Add(time.Hour),
++	p := &Platform{token: "test-token", tokenExpiry: time.Now().Add(time.Hour),
 +		handler: func(_ core.Platform, msg *core.Message) { got = msg }}
 +	p.handleGroupMessage(groupMessagePayload("identity-command", testGroupID, testMemberID, "<@!bot> 群聊身份"))
 +	if got != nil {
@@ -251,7 +251,7 @@ index 2c87221..562f496 100644
  		return
  	}
  
-@@ -1300,12 +1304,28 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
+@@ -1300,12 +1304,27 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
  		return
  	}
  
@@ -262,11 +262,10 @@ index 2c87221..562f496 100644
 +	rctx := &replyContext{messageType: "group", groupOpenID: d.GroupOpenID,
 +		userOpenID: d.Author.MemberOpenID, eventMsgID: d.ID, sessionKey: sessionKey}
 +	if content == "群聊身份" {
-+		if !core.AllowList(p.allowFrom, d.Author.MemberOpenID) {
-+			return
-+		}
-+		// This local, read-only command lets an owner opt in one exact member in
-+		// one exact group. It never reaches the ACP agent or Codex controller.
++		// This local, read-only command exposes only the caller's own identifiers
++		// so an administrator can add this exact group/member pair locally. It
++		// does not reveal secrets or conversation data and never reaches the ACP
++		// agent or Codex controller.
 +		reply := fmt.Sprintf("群聊身份（仅用于精确授权）：\n群号：%s\n成员：%s\n\n将下面这行添加到机器人配置的 QQ 平台选项中，保存后重启助手：\ngroup_allow_from = %q\n\n群聊回复会被群内成员看到，请只在可信群使用。",
 +			d.GroupOpenID, d.Author.MemberOpenID, d.GroupOpenID+"/"+d.Author.MemberOpenID)
 +		if err := p.Send(context.Background(), rctx, reply); err != nil {

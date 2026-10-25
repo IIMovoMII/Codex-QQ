@@ -2,16 +2,18 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 PACKAGE_DIR = Path(__file__).resolve().parents[1] / "src" / "codex_desktop_weixin"
 sys.path.insert(0, str(PACKAGE_DIR))
 
+import launcher
 from launcher import (
     cc_connect_api_socket_path,
     cc_connect_api_status,
@@ -26,7 +28,212 @@ from notifier import DeliverySettings, save_delivery_settings
 from process_watch import ProcessStatus
 
 
+class _Win32Call:
+    def __init__(self, call):
+        self.call = call
+
+    def __call__(self, *args):
+        return self.call(*args)
+
+
+class _StopKernel:
+    """An opened handle stays bound to its original simulated process."""
+    def __init__(self, identity, *, waits=(258, 258, 0)):
+        self.identity = identity
+        self.waits = iter(waits)
+        self.opened = []
+        self.terminated = []
+        self.closed = []
+        self.OpenProcess = _Win32Call(self._open)
+        self.QueryFullProcessImageNameW = _Win32Call(self._query_image)
+        self.GetProcessTimes = _Win32Call(self._times)
+        self.WaitForSingleObject = _Win32Call(lambda handle, timeout: next(self.waits))
+        self.TerminateProcess = _Win32Call(lambda handle, code: self.terminated.append(handle) or True)
+        self.CloseHandle = _Win32Call(lambda handle: self.closed.append(handle) or True)
+
+    def _open(self, access, inherit, pid):
+        self.opened.append((access, pid))
+        return 123
+
+    def _query_image(self, handle, flags, buffer, size):
+        buffer.value = self.identity['process_image']
+        return True
+
+    def _times(self, handle, creation, exit_time, kernel_time, user_time):
+        ticks = round((self.identity['process_start_time'] + launcher.WINDOWS_EPOCH_OFFSET_SECONDS) * 10_000_000)
+        creation._obj.dwLowDateTime = ticks & 0xffffffff
+        creation._obj.dwHighDateTime = ticks >> 32
+        return True
+
+
 class CCConnectLifecycleTests(unittest.TestCase):
+    def _stop_with_kernel(self, kernel, state):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_path = root / 'state' / 'cc-connect.json'
+            state_path.parent.mkdir()
+            state_path.write_text(json.dumps(state), encoding='utf-8')
+            with patch('launcher.os.name', 'nt'), \
+                 patch('launcher.ctypes.WinDLL', return_value=kernel, create=True), \
+                 patch('launcher.ctypes.WinError', side_effect=lambda code: OSError(code, 'simulated Windows failure'), create=True), \
+                 patch('launcher.ctypes.get_last_error', return_value=5, create=True), \
+                 patch('launcher._read_service_state', return_value=state), \
+                 patch('launcher.read_cc_connect_pid', return_value=42), \
+                 patch('launcher._process_identity_matches', return_value=True), \
+                 patch('launcher._pid_alive', return_value=True), \
+                 patch('launcher._send_windows_ctrl_break') as graceful, \
+                 patch('launcher.cleanup_stale_cc_connect_socket', return_value={}), \
+                 patch('launcher.time.monotonic', return_value=0):
+                result = launcher.stop_cc_connect_service(root, timeout_seconds=0)
+            self.assertEqual(state_path.exists(), not result['cc_connect_stopped'])
+        return result, graceful
+
+    def test_force_stop_verifies_the_opened_handle_before_terminating(self):
+        state = {'identity_version': 1, 'pid': 42, 'process_image': r'C:\\gateway.exe', 'process_start_time': 1000.0}
+        kernel = _StopKernel({**state, 'process_start_time': 2000.0})
+        result, graceful = self._stop_with_kernel(kernel, state)
+        self.assertEqual(kernel.terminated, [], 'a PID reused after the last identity check must not be killed')
+        self.assertFalse(result['cc_connect_stopped'])
+        self.assertEqual(result['reason'], 'managed-process-identity-changed')
+        graceful.assert_not_called()
+        self.assertEqual(kernel.closed, [123])
+
+    def test_force_stop_rejects_same_image_restarted_within_a_quarter_second(self):
+        state = {'identity_version': 1, 'pid': 42, 'process_image': r'C:\\gateway.exe', 'process_start_time': 1000.0}
+        kernel = _StopKernel({**state, 'process_start_time': 1000.1})
+        result, graceful = self._stop_with_kernel(kernel, state)
+        self.assertFalse(result['cc_connect_stopped'])
+        self.assertEqual(result['reason'], 'managed-process-identity-changed')
+        self.assertEqual(kernel.terminated, [])
+        graceful.assert_not_called()
+
+    def test_force_stop_confirms_exit_on_the_same_verified_handle(self):
+        state = {'identity_version': 1, 'pid': 42, 'process_image': r'C:\\gateway.exe', 'process_start_time': 1000.0}
+        kernel = _StopKernel(state)
+        result, graceful = self._stop_with_kernel(kernel, state)
+        self.assertTrue(result['cc_connect_stopped'])
+        self.assertEqual(result['reason'], 'forced_after_graceful_timeout')
+        self.assertEqual(kernel.terminated, [123])
+        self.assertEqual(kernel.closed, [123])
+        self.assertEqual(kernel.opened, [(0x101001, 42)])
+        graceful.assert_called_once_with(42)
+
+    def test_force_stop_timeout_preserves_state_and_closes_handle(self):
+        state = {'identity_version': 1, 'pid': 42, 'process_image': r'C:\\gateway.exe', 'process_start_time': 1000.0}
+        kernel = _StopKernel(state, waits=(258, 258, 258))
+        result, _ = self._stop_with_kernel(kernel, state)
+        self.assertFalse(result['cc_connect_stopped'])
+        self.assertEqual(result['reason'], 'force_timeout')
+        self.assertEqual(kernel.terminated, [123])
+        self.assertEqual(kernel.closed, [123])
+
+    def test_graceful_stop_confirms_exit_on_the_verified_handle(self):
+        state = {'identity_version': 1, 'pid': 42, 'process_image': r'C:\\gateway.exe', 'process_start_time': 1000.0}
+        kernel = _StopKernel(state, waits=(258, 0))
+        result, graceful = self._stop_with_kernel(kernel, state)
+        self.assertTrue(result['cc_connect_stopped'])
+        self.assertEqual(result['reason'], 'graceful')
+        self.assertEqual(kernel.terminated, [])
+        self.assertEqual(kernel.closed, [123])
+        graceful.assert_called_once_with(42)
+
+    def test_exit_between_grace_timeout_and_terminate_is_confirmed_by_handle(self):
+        state = {'identity_version': 1, 'pid': 42, 'process_image': r'C:\\gateway.exe', 'process_start_time': 1000.0}
+        kernel = _StopKernel(state)
+        kernel.TerminateProcess = _Win32Call(lambda handle, code: False)
+        result, _ = self._stop_with_kernel(kernel, state)
+        self.assertTrue(result['cc_connect_stopped'])
+        self.assertEqual(result['reason'], 'graceful_during_force_race')
+        self.assertEqual(kernel.closed, [123])
+
+    def test_process_already_exited_does_not_receive_console_signal(self):
+        state = {'identity_version': 1, 'pid': 42, 'process_image': r'C:\\gateway.exe', 'process_start_time': 1000.0}
+        kernel = _StopKernel(state, waits=(0,))
+        result, graceful = self._stop_with_kernel(kernel, state)
+        self.assertTrue(result['cc_connect_stopped'])
+        self.assertEqual(kernel.terminated, [])
+        self.assertEqual(kernel.closed, [123])
+        graceful.assert_not_called()
+
+    def test_stop_open_failure_preserves_state_without_signalling(self):
+        state = {'identity_version': 1, 'pid': 42, 'process_image': r'C:\\gateway.exe', 'process_start_time': 1000.0}
+        kernel = _StopKernel(state)
+        kernel.OpenProcess = _Win32Call(lambda *args: 0)
+        result, graceful = self._stop_with_kernel(kernel, state)
+        self.assertFalse(result['cc_connect_stopped'])
+        self.assertEqual(kernel.terminated, [])
+        self.assertEqual(kernel.closed, [])
+        graceful.assert_not_called()
+
+    def test_stop_wait_failure_preserves_state_and_closes_handle(self):
+        state = {'identity_version': 1, 'pid': 42, 'process_image': r'C:\\gateway.exe', 'process_start_time': 1000.0}
+        kernel = _StopKernel(state, waits=(0xffffffff,))
+        result, graceful = self._stop_with_kernel(kernel, state)
+        self.assertFalse(result['cc_connect_stopped'])
+        self.assertEqual(kernel.terminated, [])
+        self.assertEqual(kernel.closed, [123])
+        graceful.assert_not_called()
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows process handles required')
+    def test_real_windows_stop_uses_verified_handle_and_preserves_other_child(self):
+        children = []
+        try:
+            for _ in range(2):
+                children.append(subprocess.Popen(
+                    [sys.executable, '-c', 'import time; time.sleep(120)'],
+                    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW))
+            target, other = children
+            state = launcher._capture_process_identity(target.pid)
+            # Isolate the forced-stop path without signalling any console.
+            # Identity lookup, process opening, termination and wait are real Win32.
+            with patch('launcher._send_windows_ctrl_break'):
+                reason = launcher._stop_windows_process(target.pid, state, 0.01)
+            self.assertEqual(reason, 'forced_after_graceful_timeout')
+            self.assertEqual(target.wait(timeout=5), 1)
+            self.assertIsNone(other.poll())
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=5)
+
+    def test_api_status_tolerates_unavailable_local_socket_support(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch('launcher.socket.socket', side_effect=PermissionError('AF_UNIX is unavailable')):
+                self.assertIsNone(launcher._socket_is_reachable(root / 'api.sock'))
+                self.assertEqual(cc_connect_api_status(root), 'missing')
+
+    def test_windows_pid_probe_failure_is_not_treated_as_exit(self):
+        with patch.object(launcher.os, 'name', 'nt'), \
+                patch.object(launcher.ctypes, 'WinDLL', create=True) as windll, \
+                patch.object(launcher.ctypes, 'get_last_error', return_value=5, create=True):
+            windll.return_value.OpenProcess.return_value = None
+            self.assertTrue(launcher._pid_alive(1234))
+        with patch.object(launcher.os, 'name', 'nt'), \
+                patch.object(launcher.ctypes, 'WinDLL', create=True) as windll, \
+                patch.object(launcher.ctypes, 'get_last_error', return_value=launcher.ERROR_INVALID_PARAMETER, create=True):
+            windll.return_value.OpenProcess.return_value = None
+            self.assertFalse(launcher._pid_alive(1234))
+
+    def test_unavailable_probe_preserves_existing_socket(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            socket_path = cc_connect_api_socket_path(root)
+            socket_path.parent.mkdir(parents=True)
+            socket_path.touch()
+            stream = Mock()
+            stream.settimeout.side_effect = PermissionError('socket options unavailable')
+            with patch.object(launcher.socket, 'AF_UNIX', 1, create=True), \
+                    patch('launcher.socket.socket', return_value=stream):
+                self.assertIsNone(launcher._socket_is_reachable(socket_path))
+                result = cleanup_stale_cc_connect_socket(root)
+            self.assertEqual(result['socket_cleanup'], 'failed')
+            self.assertTrue(socket_path.exists())
+            stream.connect.assert_not_called()
+            self.assertEqual(stream.close.call_count, 2)
+
     def test_monitor_ready_flag_distinguishes_starting_from_running(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -129,7 +336,8 @@ class CCConnectLifecycleTests(unittest.TestCase):
             socket_path.parent.mkdir(parents=True)
             socket_path.write_bytes(b"")
 
-            result = cleanup_stale_cc_connect_socket(root)
+            with patch('launcher._socket_is_reachable', return_value=False):
+                result = cleanup_stale_cc_connect_socket(root)
 
             self.assertEqual(result["socket_cleanup"], "removed")
             self.assertFalse(socket_path.exists())
@@ -148,7 +356,8 @@ class CCConnectLifecycleTests(unittest.TestCase):
             cache_path = socket_path.parent / "qqbot_message_cache.json"
             cache_path.write_text('{"seen": true}', encoding="utf-8")
 
-            with patch("launcher._unlink_socket_path", side_effect=OSError("special endpoint")):
+            with patch("launcher._unlink_socket_path", side_effect=OSError("special endpoint")), \
+                 patch('launcher._socket_is_reachable', return_value=False):
                 result = cleanup_stale_cc_connect_socket(root)
 
             if sys.platform == "win32":

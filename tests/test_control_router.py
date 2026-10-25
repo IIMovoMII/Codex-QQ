@@ -193,15 +193,42 @@ class ControlRouterTests(unittest.TestCase):
         self.assertIn("作废", self.controller.handle(params))
         self.assertIn("已提交", self.send("继续", quote=card))
 
-    def test_bridge_restart_rejects_event_buffered_before_new_bridge_generation(self):
+    def test_lazy_bridge_accepts_first_event_after_gateway_and_desktop_ready(self):
+        # The real gateway receives this event before starting its ACP child.
+        params = self.request('继续', quote=f'对话编号：{THREAD_A}',
+                              message_id='cold-start-event')
+        cold = ControlRouter(ControlStore(Path(self.tmp.name) / 'cold.sqlite'),
+                             FakeCatalog(), self.backend,
+                             lambda t, text: (self.calls.append((t, text)) or True, ''))
+        self.assertIn('已提交', cold.handle(params))
+        self.assertEqual(self.calls, [(THREAD_A, '继续')])
+
+    def test_bridge_recreation_keeps_live_events_and_receipt_deduplication(self):
         card = self.send('/use ' + THREAD_A)
-        restarted = ControlRouter(self.store, FakeCatalog(), self.backend,
-                                   lambda t, text: (self.calls.append((t, text)) or True, ""))
-        # Simulate an event buffered before this bridge instance started.
-        buffered_at = restarted._process_started_at - 1.0
-        params = self.request('继续', quote=card, message_id='before-bridge-restart',
-                              timestamp=buffered_at)
-        self.assertIn('作废', restarted.handle(params))
+        for index in range(3):
+            params = self.request('继续', quote=card, message_id=f'before-acp-start-{index}')
+            restarted = ControlRouter(self.store, FakeCatalog(), self.backend,
+                                       lambda t, text: (self.calls.append((t, text)) or True, ''))
+            reply = restarted.handle(params)
+            self.assertIn('已提交', reply)
+            self.assertEqual(restarted.handle(params), reply)
+        self.assertEqual(self.calls, [(THREAD_A, '继续')] * 3)
+
+    def test_lazy_bridge_still_rejects_events_before_actual_ready_boundaries(self):
+        for boundary in ('gateway', 'desktop'):
+            with self.subTest(boundary=boundary):
+                sent = time.time() - 1
+                params = self.request('继续', quote=f'对话编号：{THREAD_A}',
+                                      message_id=boundary, timestamp=sent)
+                if boundary == 'gateway':
+                    params['_meta']['cc_connect']['connection_ready_at_ms'] = (sent + 0.5) * 1000
+                backend = FakeBackend()
+                if boundary == 'desktop':
+                    backend.probe = lambda: ('new-desktop', sent + 0.5)
+                cold = ControlRouter(ControlStore(Path(self.tmp.name) / (boundary + '.sqlite')),
+                                     FakeCatalog(), backend,
+                                     lambda t, text: (self.calls.append((t, text)) or True, ''))
+                self.assertIn('作废', cold.handle(params))
         self.assertEqual(self.calls, [])
 
     def test_bridge_state_store_failure_fails_closed_before_dispatch(self):
