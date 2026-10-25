@@ -453,7 +453,7 @@ class ControlRouter:
                 body = (f"{self.catalog.label(row)}\n\n"
                         "⏳ 已加入 Codex Desktop 的可见待发送列表，会在当前任务后按顺序处理。\n"
                         f"队列编号：{entry['id']}\n"
-                        "引用本条回复“队列”可查看；回复“删除”只撤回仍在排队的这一条。\n"
+                        "引用本条回复“队列”可查看；回复“删除”移除它，“引导”先移除再把原文交给当前任务。\n"
                         "不会把消息放入看不见的后台队列，也不会自动改成引导。")
                 return self._card(scope, 'queued', {'thread_id': thread_id, 'entry': entry,
                                                     'connection': meta['_desktop_identity']}, body, ttl=None), 'confirmed'
@@ -467,7 +467,7 @@ class ControlRouter:
                 receipt['client_id'] = observed.get('client_id')
                 body = f"{self.catalog.label(row)}\n已提交给 Codex。{status_text(observed)}"
                 body += '\n\n引用本条回复“状态”查看这一条；回复“删除”仅移除仍在排队的本条消息。'
-                body += '\n排队转引导尚未开放。引用回复“对话”取得普通对话回执，可另发“引导 正文”。'
+                body += '\n此发送回执不支持直接转引导；引用“对话”返回的回执发“队列”，可查看并操作仍可核实的原生队列项。'
                 return self._card(scope, 'submission', receipt, body, ttl=None), 'confirmed'
             return self._card(scope, 'thread', {'thread_id': thread_id, 'connection': meta['_desktop_identity']},
                               f"{self.catalog.label(row)}\n已提交给 Codex，但原生回执没有可核实的消息编号，执行状态未确认；不能据此认定已开始。\n完成或出错后会继续提醒。引用本条发送“队列”可查看当前可见的本地记录；不会重发。"), "confirmed"

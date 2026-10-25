@@ -38,6 +38,7 @@ class ActionBackend(FakeBackend):
         self.compactions = []
         self.permissions = {'approvalPolicy': 'on-request', 'sandboxPolicy': {'type': 'readOnly'}}
         self.steered = []
+        self.queue_guides = []
 
     def require_extended_contract(self):
         pass
@@ -53,6 +54,12 @@ class ActionBackend(FakeBackend):
     def remove_saved_queue_item(self, thread, entry, catalog):
         self.removed.append((thread, entry['id']))
         return {'state': 'confirmed', 'reply': '已移除这一条待发送消息。'}
+
+    def guide_saved_queue_item(self, thread, entry, catalog, connection=None):
+        self.queue_guides.append((thread, entry['id'], connection))
+        self.removed.append((thread, entry['id']))
+        self.steered.append((thread, '原排队正文', connection, 'operation'))
+        return {'state': 'confirmed', 'reply': '已先删除，再将相同正文引导给当前任务。'}
 
     def update_permissions(self, thread, changes, baseline):
         self.permission_updates.append((thread, changes))
@@ -111,27 +118,28 @@ class ActionRouterTests(unittest.TestCase):
         self.send('1', quote=detail)
         self.assertEqual(len(self.backend.responded), 1)
 
-    def test_queue_selection_guides_or_deletes_exact_id(self):
+    def test_queue_selection_converts_or_deletes_exact_id_without_confirmation(self):
         card = self.send('/use ' + THREAD_A)
         listing = self.send('队列', quote=card)
         self.assertIn('可能不含服务端', listing)
         selected = self.send('1', quote=listing)
-        self.assertIn('提供引导', self.send('引导', quote=selected))
-        guided = self.send('引导 检查当前任务', quote=selected, message_id='queue-guide')
-        self.assertIn('当前正在运行的任务', guided)
+        self.assertIn('回复“引导”', self.send('状态', quote=selected))
+        guided = self.send('引导', quote=selected, message_id='queue-guide')
+        self.assertIn('先删除', guided)
         self.assertEqual(len(self.backend.steered), 1)
-        self.assertEqual(self.backend.steered[0][1], '检查当前任务')
+        self.assertEqual(self.backend.queue_guides, [(THREAD_A, 'message-1', 'same-process')])
+        self.assertIn('只回复', self.send('引导 改成别的内容', quote=selected))
         self.assertIn('可以回复', self.send('中文新任务', quote=selected))
         self.assertIn('移除', self.send('删除', quote=selected))
         self.send('删除', quote=selected)
-        self.assertEqual(self.backend.removed, [(THREAD_A, 'message-1')])
+        self.assertEqual(self.backend.removed, [(THREAD_A, 'message-1'), (THREAD_A, 'message-1')])
         self.assertEqual(self.calls, [])
 
-    def test_queue_steer_is_deduplicated_and_old_connection_is_rejected(self):
+    def test_queue_conversion_is_deduplicated_and_old_connection_is_rejected(self):
         card = self.send('/use ' + THREAD_A)
         selected = self.send('1', quote=self.send('队列', quote=card))
-        first = self.send('引导 保持当前方向', quote=selected, message_id='queue-guide-once')
-        self.assertEqual(self.send('引导 保持当前方向', quote=selected, message_id='queue-guide-once'), first)
+        first = self.send('引导', quote=selected, message_id='queue-guide-once')
+        self.assertEqual(self.send('引导', quote=selected, message_id='queue-guide-once'), first)
         self.assertEqual(len(self.backend.steered), 1)
         with patch.object(self.backend, 'probe', return_value=('new-process', 1.0)):
             self.assertIn('旧连接', self.controller.handle(self.request('删除', quote=selected)))
@@ -280,6 +288,39 @@ class NativeActionTests(unittest.TestCase):
         with patch.object(self.backend, 'call') as call:
             self.assertEqual(self.backend.remove_saved_queue_item(THREAD, entry, catalog)['state'], 'rejected')
             call.assert_not_called()
+
+    def test_queue_conversion_deletes_before_guiding_exact_text_and_stops_on_uncertain_delete(self):
+        raw = saved_entry()
+        entry = normalize_saved_queue([raw])[0]
+        catalog = type('Catalog', (), {'saved_queue_rows': lambda _, t: [raw]})()
+        self.state['turn'] = {'status': 'inProgress', 'turnId': 'running-turn'}
+        self.state['cwd'] = 'C:\\workspace'
+        events = []
+
+        def remove(*args, **kwargs):
+            events.append('delete')
+            return {'state': 'confirmed', 'result': {'removed': {'message': raw}}}
+
+        def steer(thread, text, connection, operation):
+            events.append(('guide', thread, text))
+            return {'state': 'confirmed', 'reply': 'accepted'}
+
+        with patch.object(self.backend, 'call', side_effect=remove) as call, \
+                patch.object(self.backend, 'steer', side_effect=steer):
+            result = self.backend.guide_saved_queue_item(THREAD, entry, catalog, connection='conn')
+        self.assertEqual(result['state'], 'confirmed')
+        self.assertEqual(events, ['delete', ('guide', THREAD, raw['text'])])
+        self.assertEqual(call.call_args.args[1:3],
+                         ('thread-follower-remove-queued-message', {'messageId': entry['id']}))
+
+        events.clear()
+        with patch.object(self.backend, 'call', return_value={'state': 'unknown'}) as call, \
+                patch.object(self.backend, 'steer') as guide:
+            result = self.backend.guide_saved_queue_item(THREAD, entry, catalog, connection='conn')
+        self.assertEqual(result['state'], 'unknown')
+        self.assertIn('没有继续发送引导', result['reply'])
+        call.assert_called_once()
+        guide.assert_not_called()
 
     def test_request_payload_targets_same_request_and_lost_reply_never_repeated(self):
         request = question(THREAD)

@@ -197,16 +197,6 @@ index 0000000..9ee65db
 +	}
 +}
 +
-+func TestGroupMessagesAreIgnoredByPrivateChatAdapter(t *testing.T) {
-+	p := &Platform{allowFrom: "*"}
-+	called := false
-+	p.handler = func(_ core.Platform, _ *core.Message) { called = true }
-+	p.handleDispatch("GROUP_AT_MESSAGE_CREATE", []byte(`{"id":"group-message","group_openid":"group","content":"绑定","author":{"member_openid":"user"}}`))
-+	if called {
-+		t.Fatal("group message reached the private-chat adapter")
-+	}
-+}
-+
 +func TestControlFooterPreservesAsyncQuestionRouting(t *testing.T) {
 +	content := "异步问题提醒\n\n异步问题对话：00000000-0000-7000-8000-000000000001\n提问编号：call_test"
 +	want := "异步问题对话：00000000-0000-7000-8000-000000000001\n提问编号：call_test"

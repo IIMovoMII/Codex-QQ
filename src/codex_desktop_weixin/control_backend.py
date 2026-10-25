@@ -7,6 +7,7 @@ import re
 import sqlite3
 import threading
 import time
+import uuid
 from typing import Any
 
 from desktop_control import (DesktopClient, DesktopControlError, QUEUED_FOLLOWUPS_METHOD,
@@ -579,6 +580,77 @@ class NativeBackend:
         if not isinstance(message, dict) or message.get('id') != entry['id'] or signature(message) != entry['digest']:
             return {'state': 'unknown', 'reply': '窗口已受理移除，但返回记录变化，不能确认是否赶在发送前删除。不会重试，请检查电脑。'}
         return {'state': 'confirmed', 'reply': '已移除这一条待发送消息，未清空其他消息。已经开始的模型任务不能靠删除队列撤回。'}
+
+    def guide_saved_queue_item(self, thread_id: str, entry: dict, catalog: Any,
+                               connection: str | None = None) -> dict:
+        """Delete one verified visible queue row, then guide its exact text.
+
+        These are two native requests, not a transaction. We require a live
+        task before deleting and only guide after the native removal response
+        identifies the exact queued row. An ambiguous/failed guide is never
+        retried because the queue item has already been consumed.
+        """
+        try:
+            self.require_extended_contract()
+        except Exception:
+            return {'state': 'rejected', 'reply': '当前 Desktop 原生接口无法核实，未删除、未引导；恢复连接后重新查看队列再试。'}
+        from control_actions import normalize_saved_queue, signature
+
+        try:
+            rows = catalog.saved_queue_rows(thread_id)
+            matches = [row for row in rows if isinstance(row, dict) and row.get('id') == entry.get('id')]
+            if len(matches) != 1:
+                return {'state': 'rejected', 'reply': '这条排队消息已变化或不再唯一，未删除、未引导；请重新查看队列。'}
+            original = matches[0]
+            current = normalize_saved_queue([original])
+            if (len(current) != 1 or current[0]['digest'] != entry.get('digest')
+                    or current[0]['status'] != 'queued'):
+                return {'state': 'rejected', 'reply': '这条排队消息已开始、变化或不再存在，未删除、未引导；请重新查看队列。'}
+            text = original.get('text')
+            if not isinstance(text, str):
+                return {'state': 'rejected', 'reply': '排队正文无法安全读取，未删除、未引导。'}
+            text.encode('utf-8', errors='strict')
+            if not 1 <= len(text.strip()) <= 4000:
+                return {'state': 'rejected', 'reply': '原排队正文为空或超过引导长度上限，未删除、未引导。'}
+
+            before = self.snapshot(thread_id, expected_connection=connection)
+        except (OSError, TimeoutError, ValueError, UnicodeError, DesktopControlError,
+                sqlite3.Error, KeyError, TypeError):
+            return {'state': 'rejected', 'reply': '队列内容或当前窗口无法核实，未删除、未引导；请恢复连接后重查。'}
+
+        turn = before.get('turn') or {}
+        if turn.get('status') != 'inProgress':
+            return {'state': 'rejected', 'reply': '当前没有正在运行的任务，未删除排队消息；请在任务运行时再引导。'}
+        if not turn.get('turnId') or not isinstance(before.get('cwd'), str) or not before['cwd']:
+            return {'state': 'rejected', 'reply': '当前任务仍在初始化，未删除排队消息；稍后再试。'}
+
+        try:
+            removed_result = self.call(
+                thread_id, 'thread-follower-remove-queued-message', {'messageId': entry['id']}, 1,
+                expected_owner=before['owner_id'], expected_connection=connection)
+        except Exception:
+            return {'state': 'unknown', 'reply': '删除结果未知，没有继续发送引导；请先在电脑检查队列，不要重复操作。'}
+        if removed_result.get('state') != 'confirmed':
+            state = removed_result.get('state') or 'unknown'
+            return {'state': state, 'reply': '删除未取得确认，没有继续发送引导；请先在电脑检查队列，不要重复操作。'}
+        removed = (removed_result.get('result') or {}).get('removed')
+        message = removed.get('message') if isinstance(removed, dict) else None
+        if (not isinstance(message, dict) or message.get('id') != entry['id']
+                or message.get('text') != text or signature(message) != entry['digest']):
+            return {'state': 'unknown', 'reply': '原生已受理删除，但返回内容无法与排队原文核对；没有继续引导，请检查电脑。'}
+
+        try:
+            guided = self.steer(thread_id, text, connection or '', uuid.uuid4().hex)
+        except Exception:
+            return {'state': 'unknown', 'reply': '排队消息已删除，但后续引导结果未知；请检查电脑，不要重发，避免重复执行。'}
+        if guided.get('state') == 'confirmed':
+            return {'state': 'confirmed',
+                    'reply': '已先从 Desktop 可见队列移除这条消息，再将相同正文引导给执行时正在运行的任务。'}
+        if guided.get('state') == 'rejected':
+            return {'state': 'rejected',
+                    'reply': '排队消息已删除，但删除后当前任务未接受引导；这两步无法原子回滚，请检查电脑后再决定下一步。'}
+        return {'state': 'unknown',
+                'reply': '排队消息已删除，但引导结果未知，可能已送达；请检查电脑，不要重发，避免重复执行。'}
 
     def respond_to_request(self, data: dict, text: str) -> dict:
         self.require_extended_contract()

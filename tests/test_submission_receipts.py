@@ -260,7 +260,7 @@ class ReceiptRouterTests(unittest.TestCase):
         check = self.send('状态', quote=ack)
         self.assertIn('正在排队', check)
         self.assertIn('没有再次提交', self.send('继续', quote=ack))
-        self.assertIn('尚未开放', self.send('引导', quote=ack))
+        self.assertIn('本条发送回执不能直接转引导', self.send('引导', quote=ack))
         self.assertEqual(self.calls, [(THREAD_A, TEXT)])
 
     def test_receipt_can_reach_normal_thread_for_explicit_direct_steer(self):

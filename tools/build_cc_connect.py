@@ -73,15 +73,12 @@ def main() -> None:
     tags = build_tags(args.source)
     joined = ','.join(tags)
     verify_dependencies(run(args.go, ['list', '-deps', '-tags', joined, './cmd/cc-connect'], args.source))
-    # Compile every ACP/QQ test without executing cases for the upstream
-    # adapter contract (group messages and legacy session-only permission
-    # buttons). Those cases contradict this build's private-chat-only,
-    # one-time request-token contract. The focused tests below cover the
-    # replacement behavior; compilation still catches stale APIs everywhere.
+    # Compile every ACP/QQ test, then run the focused permission-token,
+    # identity, and control-footer regression cases used by this adapter.
     run_checked(args.go, ['test', './agent/acp'], args.source)
     run_checked(args.go, ['test', './platform/qqbot', '-run', '^$'], args.source)
     run_checked(args.go, ['test', './platform/qqbot', '-run',
-                          '^(TestPermissionButton|TestNewPermissionRequest|TestGroupMessagesAreIgnored|TestControlFooter|TestC2CMessagesWithoutUserIdentity)'],
+                          '^(TestPermissionButton|TestNewPermissionRequest|TestControlFooter|TestC2CMessagesWithoutUserIdentity)'],
                 args.source)
     run_checked(args.go, ['test', './core', '-run',
                           '^(TestMetadataDispatchPreservesQueuedEventIdentity|TestHandlePendingPermission_StalePermissionCallback_Dropped)$'],

@@ -209,7 +209,7 @@ class ActionCommands:
             if text == '删除':
                 key = 'submission-delete:' + data['connection'] + ':' + thread_id + ':' + data['queue_id'] + ':' + data['text_digest']
                 return self._once(key, lambda: self.r.backend.remove_submission(data, self.r.catalog, self.connection))
-            return '本条回执请回复“状态”“删除”或“对话”。排队转引导尚未开放，原消息保留；没有再次提交正文。', 'rejected'
+            return '本条发送回执不能直接转引导；请回复“对话”取得目标卡片，再发“队列”选择仍可见的条目。没有再次提交正文。', 'rejected'
         if kind == 'async_notice':
             if text in ('待办', '问题', '审批'):
                 return self.command(thread_id, '待办', '')
@@ -225,8 +225,9 @@ class ActionCommands:
             entry = data['entries'][index]
             if kind == 'queue_list':
                 return self.card('queued', {'thread_id': thread_id, 'entry': entry,
-                                            'connection': self.connection},
-                                 f"待发送记录：{entry['summary']}\n状态：{self.queue_status(entry['status'])}\n引用回复“引导 内容”补充当前正在运行的任务；回复“删除”移除这一条排队消息。引导不会删除或改写本条队列消息。"), 'confirmed'
+                                            'connection': self.connection,
+                                            'operation_id': uuid.uuid4().hex},
+                                 f"待发送记录：{entry['summary']}\n状态：{self.queue_status(entry['status'])}\n回复“引导”会先删除这条排队消息，再把相同正文引导给当前运行任务；回复“删除”只移除它。"), 'confirmed'
             state = self._backend_call('control_state', thread_id, connection=self.connection)
             if entry.get('kind') == 'async_question':
                 return self._async_card(entry, state)
@@ -242,23 +243,13 @@ class ActionCommands:
                                                               connection=self.connection))
             command, _, arg = text.partition(' ')
             if command in ('引导', '/引导', '/steer'):
-                if not arg.strip():
-                    return '请提供引导正文，例如“引导 先检查当前任务”。引导只作用于正在运行的任务，不会删除这条排队消息。', 'rejected'
-                guide = arg.strip()
-                key = 'queue-steer:' + thread_id + ':' + entry['id'] + ':' + signature({'text': guide})
-
-                def steer_queued() -> dict:
-                    result = self.r.backend.steer(thread_id, guide, self.connection, str(uuid.uuid4()))
-                    if result['state'] == 'rejected':
-                        return {'state': 'rejected', 'reply': result['reply']}
-                    row = self.r.catalog.thread(thread_id)
-                    body = (self.r.catalog.label(row) if row else '原对话') + '\n' + result['reply']
-                    body += '\n这次引导作用于当前正在运行的任务；原排队消息仍保留，没有修改或删除。'
-                    return {'state': result['state'],
-                            'reply': self.r._card(self.scope, 'thread', {'thread_id': thread_id, 'connection': self.connection}, body)}
-
-                return self._once(key, steer_queued)
-            return '这条卡片可以回复“引导 内容”或“删除”。引导只作用于当前活动任务；正文请引用对话卡片发送。', 'rejected'
+                if arg.strip():
+                    return '为避免排队正文和引导内容不一致，请只回复“引导”；系统会使用这条排队消息的原文。', 'rejected'
+                key = ('queue-guide:' + str(data.get('operation_id') or entry['id']) + ':'
+                       + self.connection + ':' + thread_id + ':' + entry['digest'])
+                return self._once(key, lambda: self._backend_call(
+                    'guide_saved_queue_item', thread_id, entry, self.r.catalog, connection=self.connection))
+            return '这条卡片可以回复“引导”（删除后将原文引导给当前任务）或“删除”。', 'rejected'
         if data.get('connection') != self.connection:
             return '这项操作来自旧连接，已过期。请重新查看对应选项或待办。', 'rejected'
         if kind == 'async_question':
