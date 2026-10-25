@@ -100,6 +100,14 @@ class ReceiptTests(QueueBase, unittest.TestCase):
         self.queue.consume()
         snapshot = lambda _, expected_connection=None: {'turn': {'status': 'inProgress'}, 'accepted_submissions': []}
         self.assertEqual(observed_status(receipt(client_id=CLIENT), self.path, snapshot)['status'], 'unconfirmed')
+
+        empty = Path(self.tmp.name) / 'empty.sqlite'
+        with closing(sqlite3.connect(empty)):
+            pass
+        with self.assertRaises(ValueError):
+            read_queued_item(empty, THREAD_A, QUEUE)
+        self.assertEqual(observed_status(receipt(), empty, snapshot)['status'], 'unconfirmed')
+
         missing = Path(self.tmp.name) / 'missing.sqlite'
         self.assertEqual(observed_status(receipt(), missing, snapshot)['status'], 'unconfirmed')
         self.assertFalse(missing.exists())

@@ -56,6 +56,10 @@ class GatewayReleaseTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 package_gateway_release.package(binary, root / 'dist',
                                                 tag='v0.1.0', gateway_version='1.5.0-desktop-control.5')
+            with self.assertRaises(ValueError):
+                package_gateway_release.package(binary, root / 'dist',
+                                                tag='v1.5.0-desktop-control.6',
+                                                gateway_version='1.5.0-desktop-control.5')
 
     def test_verified_gateway_is_reused_without_network(self):
         with tempfile.TemporaryDirectory() as temp:

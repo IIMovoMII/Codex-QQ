@@ -47,7 +47,8 @@ def read_queued_item(path: Path, thread_id: str, queue_id: str,
     try:
         db.execute('PRAGMA query_only=ON')
         columns = db.execute('PRAGMA table_info(queued_items)').fetchall()
-        if tuple(row[1] for row in columns) != QUEUE_COLUMNS or columns[0][5] != 1:
+        if (not columns or tuple(row[1] for row in columns) != QUEUE_COLUMNS
+                or columns[0][5] != 1):
             raise ValueError('unsupported-native-queue-schema')
         # Bound the payload before transferring it from SQLite to Python.
         row = db.execute('SELECT thread_id, CASE WHEN length(payload_json)<=32768 '

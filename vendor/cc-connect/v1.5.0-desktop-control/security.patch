@@ -383,14 +383,14 @@ index 890eb2d..af3a2ee 100644
  		return
  	}
 +	if !core.AllowList(p.allowFrom, userID) {
-+		slog.Warn("qqbot: unauthorized interaction ignored", "user_hash", deliveryHash(userID))
++		slog.Warn("qqbot: unauthorized interaction ignored", "user_present", userID != "")
 +		return
 +	}
 +	// Validate the actor and chat before consuming the one-time token. An
 +	// unauthorized click must not burn the token for the authorized user.
 +	permission := p.takePermissionToken(token, userID, groupID, chatType)
 +	if permission == nil && p.permissionStrict.Load() {
-+		slog.Debug("qqbot: stale, unknown, or actor-mismatched permission button", "token", token)
++		slog.Debug("qqbot: stale, unknown, or actor-mismatched permission button", "token_present", token != "")
 +		return
 +	}
 +	if permission != nil {
