@@ -15,6 +15,12 @@ import package_gateway_release
 
 
 class GatewayReleaseTests(unittest.TestCase):
+    def test_release_workflow_rejects_tag_with_wrong_embedded_version(self):
+        workflow = (Path(__file__).resolve().parents[1] /
+                    '.github/workflows/release-gateway.yml').read_text(encoding='utf-8')
+        self.assertIn('$expected = "v$env:GATEWAY_VERSION"', workflow)
+        self.assertIn('$env:RELEASE_TAG -ne $expected', workflow)
+
     def test_checksum_parser_requires_one_matching_asset(self):
         digest = 'a' * 64
         self.assertEqual(fetch_gateway._expected_checksum(f'{digest}  asset.zip\n', 'asset.zip'), digest)

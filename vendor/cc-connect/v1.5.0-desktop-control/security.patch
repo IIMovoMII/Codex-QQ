@@ -158,6 +158,22 @@ index 0000000..9ee65db
 +	}
 +}
 +
++func TestNewPermissionRequestInvalidatesOlderCardForSameSession(t *testing.T) {
++	p := &Platform{allowFrom: "allowed-user"}
++	p.permissionStrict.Store(true)
++	old := p.newPermissionToken("qqbot:allowed-user", "request-old")
++	newToken := p.newPermissionToken("qqbot:allowed-user", "request-new")
++	if old == newToken {
++		t.Fatal("permission tokens unexpectedly reused")
++	}
++	if got := p.takePermissionToken(old, "allowed-user", "", "c2c"); got != nil {
++		t.Fatal("older permission card remained valid after a newer request")
++	}
++	if got := p.takePermissionToken(newToken, "allowed-user", "", "c2c"); got == nil || got.requestID != "request-new" {
++		t.Fatalf("new permission card was not retained: %#v", got)
++	}
++}
++
 +func TestPermissionButtonRejectsUnauthorizedAndLegacyAfterStrictMode(t *testing.T) {
 +	p := &Platform{allowFrom: "allowed-user,other-user"}
 +	p.permissionStrict.Store(true)
@@ -410,6 +426,15 @@ index 890eb2d..af3a2ee 100644
 +	cutoff := time.Now().Add(-30 * time.Minute)
 +	for key, value := range p.permissionTokens {
 +		if value.createdAt.Before(cutoff) {
++			delete(p.permissionTokens, key)
++		}
++	}
++	// A session can have only one pending permission request. Once a newer
++	// request is rendered, older cards must not remain capable of answering a
++	// reused ACP request id after an agent restart. Keep tokens for other QQ
++	// sessions, but invalidate every earlier card for this exact session.
++	for key, value := range p.permissionTokens {
++		if value.sessionKey == sessionKey {
 +			delete(p.permissionTokens, key)
 +		}
 +	}

@@ -81,9 +81,11 @@ def main() -> None:
     run_checked(args.go, ['test', './agent/acp'], args.source)
     run_checked(args.go, ['test', './platform/qqbot', '-run', '^$'], args.source)
     run_checked(args.go, ['test', './platform/qqbot', '-run',
-                          '^(TestPermissionButton|TestGroupMessagesAreIgnored|TestControlFooter|TestC2CMessagesWithoutUserIdentity)'],
+                          '^(TestPermissionButton|TestNewPermissionRequest|TestGroupMessagesAreIgnored|TestControlFooter|TestC2CMessagesWithoutUserIdentity)'],
                 args.source)
-    run_checked(args.go, ['test', './core', '-run', 'TestMetadataDispatchPreservesQueuedEventIdentity'], args.source)
+    run_checked(args.go, ['test', './core', '-run',
+                          '^(TestMetadataDispatchPreservesQueuedEventIdentity|TestHandlePendingPermission_StalePermissionCallback_Dropped)$'],
+                args.source)
     target.parent.mkdir(parents=True, exist_ok=True)
     run(args.go, ['build', '-trimpath', '-tags', joined, '-ldflags', f'-s -w -X main.version={args.version}',
                   '-o', str(target), './cmd/cc-connect'], args.source)
