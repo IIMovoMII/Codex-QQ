@@ -33,6 +33,13 @@ jobs:
         with:
           go-version: '1.25.x'
           cache: false
+      - name: 核对发布标签与网关版本
+        shell: pwsh
+        run: |
+          $expected = "v$env:GATEWAY_VERSION"
+          if ($env:RELEASE_TAG -ne $expected) {
+            throw "发布标签必须是 $expected；当前输入 $env:RELEASE_TAG 与二进制内部版本不一致，已停止。"
+          }
       - name: 核对基线、应用补丁并运行网关专项测试
         run: python -X utf8 tools/ci_build_gateway.py --version $env:GATEWAY_VERSION
       - name: 打包网关、来源信息和校验文件

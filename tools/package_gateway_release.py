@@ -28,6 +28,8 @@ def package(binary: Path, output_dir: Path, *, tag: str,
         raise ValueError('需要 Windows 网关 exe 文件')
     if not re.fullmatch(r'v1\.5\.0-desktop-control\.\d+', tag):
         raise ValueError('发布标签必须与配套网关版本一致，例如 v1.5.0-desktop-control.5')
+    if gateway_version != tag.removeprefix('v'):
+        raise ValueError('网关内部版本必须与发布标签一致，拒绝生成自相矛盾的 BUILD_INFO')
     if upstream_revision != UPSTREAM_REVISION:
         raise ValueError('上游固定提交不匹配，拒绝打包')
     output_dir.mkdir(parents=True, exist_ok=True)
