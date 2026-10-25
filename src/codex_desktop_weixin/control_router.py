@@ -399,7 +399,8 @@ class ControlRouter:
                         f"队列编号：{entry['id']}\n"
                         "引用本条回复“队列”可查看；回复“删除”只撤回仍在排队的这一条。\n"
                         "不会把消息放入看不见的后台队列，也不会自动改成引导。")
-                return self._card(scope, 'queued', {'thread_id': thread_id, 'entry': entry}, body, ttl=None), 'confirmed'
+                return self._card(scope, 'queued', {'thread_id': thread_id, 'entry': entry,
+                                                    'connection': meta['_desktop_identity']}, body, ttl=None), 'confirmed'
             from submission_receipts import queue_ack, digest, status_text
             queue_id = queue_ack(result['detail'], thread_id)
             if queue_id:

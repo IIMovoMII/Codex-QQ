@@ -37,6 +37,7 @@ class ActionBackend(FakeBackend):
         self.compact_calls = 0
         self.compactions = []
         self.permissions = {'approvalPolicy': 'on-request', 'sandboxPolicy': {'type': 'readOnly'}}
+        self.steered = []
 
     def require_extended_contract(self):
         pass
@@ -60,6 +61,10 @@ class ActionBackend(FakeBackend):
     def compact(self, thread):
         self.compact_calls += 1
         return {'state': 'confirmed', 'reply': '窗口已受理压缩，不等于压缩完成。', 'baseline': [], 'owner_id': 'owner'}
+
+    def steer(self, thread, text, connection, operation):
+        self.steered.append((thread, text, connection, operation))
+        return {'state': 'confirmed', 'reply': '引导已接受。'}
 
 
 class ActionRouterTests(unittest.TestCase):
@@ -106,17 +111,30 @@ class ActionRouterTests(unittest.TestCase):
         self.send('1', quote=detail)
         self.assertEqual(len(self.backend.responded), 1)
 
-    def test_queue_selection_deletes_exact_id_and_forbids_steer_or_text(self):
+    def test_queue_selection_guides_or_deletes_exact_id(self):
         card = self.send('/use ' + THREAD_A)
         listing = self.send('队列', quote=card)
         self.assertIn('可能不含服务端', listing)
         selected = self.send('1', quote=listing)
-        self.assertIn('未开放', self.send('引导', quote=selected))
-        self.assertIn('只可', self.send('中文新任务', quote=selected))
+        self.assertIn('提供引导', self.send('引导', quote=selected))
+        guided = self.send('引导 检查当前任务', quote=selected, message_id='queue-guide')
+        self.assertIn('当前正在运行的任务', guided)
+        self.assertEqual(len(self.backend.steered), 1)
+        self.assertEqual(self.backend.steered[0][1], '检查当前任务')
+        self.assertIn('可以回复', self.send('中文新任务', quote=selected))
         self.assertIn('移除', self.send('删除', quote=selected))
         self.send('删除', quote=selected)
         self.assertEqual(self.backend.removed, [(THREAD_A, 'message-1')])
         self.assertEqual(self.calls, [])
+
+    def test_queue_steer_is_deduplicated_and_old_connection_is_rejected(self):
+        card = self.send('/use ' + THREAD_A)
+        selected = self.send('1', quote=self.send('队列', quote=card))
+        first = self.send('引导 保持当前方向', quote=selected, message_id='queue-guide-once')
+        self.assertEqual(self.send('引导 保持当前方向', quote=selected, message_id='queue-guide-once'), first)
+        self.assertEqual(len(self.backend.steered), 1)
+        with patch.object(self.backend, 'probe', return_value=('new-process', 1.0)):
+            self.assertIn('旧连接', self.controller.handle(self.request('删除', quote=selected)))
 
     def test_empty_saved_queue_never_claims_server_queue_empty(self):
         card = self.send('/use ' + THREAD_A)
