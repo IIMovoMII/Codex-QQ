@@ -62,7 +62,7 @@ Codex 重启或升级后，本地连接地址可能变化。新版会在需要�
 
 先运行 `py -3 --version`；没有 Python 时安装 Windows x64 的 Python 3.11+，关闭并重开终端。没有 Git 可在 GitHub 点击 Code → Download ZIP，解压后运行 `install.cmd`。
 
-智能体只需运行 `py -3 -X utf8 tools/install_app.py --check` 查看简短状态，再执行 `--prepare` 准备程序。下载失败时检查到 GitHub Releases 的网络、代理、证书及 HTTP 错误；解决后重试，保留文件校验和现用版本。
+普通安装让智能体或用户在项目根目录直接运行一次 `install.cmd`；向导会自行检查环境并准备程序。只有需要单独只读诊断时才运行 `py -3 -X utf8 tools/install_app.py --check`，只准备程序文件时才运行 `--prepare`。下载失败时检查到 GitHub Releases 的网络、代理、证书及 HTTP 错误；解决后重试，保留文件校验和现用版本。
 
 若提示已有其他版本网关，按[更新已有安装](development.md#更新已有安装)校验候选文件后再换，不清除绑定。
 
