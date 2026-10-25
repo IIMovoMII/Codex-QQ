@@ -62,6 +62,9 @@ app_id = {q(app_id)}
 app_secret = {q(secret)}
 sandbox = {str(sandbox).lower()}
 allow_from = {q(openid or '*')}
+# Optional group control: exact "group_openid/member_openid" pairs, comma-separated.
+# Empty by default; group messages never inherit allow_from.
+group_allow_from = ""
 markdown_support = false
 '''
     tomllib.loads(text)

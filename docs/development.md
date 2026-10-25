@@ -53,13 +53,14 @@ Windows 原生测试中有隔离进程、托盘和注册表场景；不要把测
 
 ## CC Connect 适配版
 
-基于 v1.5.0 的固定提交，按 `metadata.patch`、`delivery.patch`、`minimal-build.patch` 顺序应用：
+基于 v1.5.0 的固定提交，发布适配网关会按 `metadata.patch`、`delivery.patch`、`minimal-build.patch`、`security.patch`、`group.patch` 顺序应用：
 
 1. 原始消息 ID、时间、重连边界和引用信息透传给 ACP。
 2. 有路由尾部的引用保存小型持久索引，不只依赖短期内存缓存。
 3. 独立提醒走主动发送，不复用旧消息回复上下文。
 4. QQ 业务错误、缺少消息 ID 不再当作成功。
 5. 精简构建开关同样覆盖上游命令入口，避免未选用的平台/代理被间接导入。
+6. 群聊默认关闭；仅接受精确的群/成员白名单，群内权限按钮也绑定同一身份。
 
 配套网关只保留 ACP 和 QQ；校验来源、组件标记及接口，不能只看 `--version`。基线及第三方许可见[声明](../THIRD_PARTY_NOTICES.md)。
 

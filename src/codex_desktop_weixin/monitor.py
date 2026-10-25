@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import queue
@@ -23,6 +24,25 @@ from rollout import is_desktop_rollout
 from state_machine import StateMachine
 from tailer import IncrementalTailer
 from winwatch import DirectoryChange, WindowsDirectoryWatcher
+
+
+MISSING_TRANSCRIPT_GRACE = timedelta(days=7)
+ORPHAN_RECORD_RETENTION = timedelta(days=30)
+MAX_ORPHAN_RECORDS = 500
+PROCESSED_SPOOL_RETENTION = timedelta(days=7)
+FAILED_SPOOL_RETENTION = timedelta(days=30)
+MAX_PROCESSED_SPOOL_FILES = 2000
+MAX_FAILED_SPOOL_FILES = 500
+SPOOL_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
+SENT_OUTBOX_RETENTION = timedelta(days=7)
+FAILED_OUTBOX_RETENTION = timedelta(days=30)
+OBSOLETE_OUTBOX_RETENTION = timedelta(days=30)
+MAX_SENT_OUTBOX_FILES = 1000
+MAX_FAILED_OUTBOX_FILES = 500
+MAX_OBSOLETE_OUTBOX_FILES = 500
+ROTATED_LOG_RETENTION = timedelta(days=30)
+MAX_ROTATED_LOG_FILES = 4
+MAX_ACTIVE_LOG_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -51,6 +71,7 @@ class DesktopMonitor:
         self.watchers: list[WindowsDirectoryWatcher] = []
         self.last_reconciliation = 0.0
         self.last_process_check = 0.0
+        self.last_spool_cleanup: float | None = None
         self.last_process_status: ProcessStatus | None = None
         self.process_missing_since: float | None = None
         self.desktop_seen = False
@@ -204,8 +225,17 @@ class DesktopMonitor:
             if transcript is not None:
                 try:
                     desktop_rollout = is_desktop_rollout(transcript)
-                except (FileNotFoundError, PermissionError, OSError):
-                    desktop_rollout = None
+                except FileNotFoundError:
+                    if self._archive_expired_missing_transcript(path, event, transcript_text):
+                        return
+                    # A hook can arrive before the rollout is created. Keep
+                    # recent events; only age out a transcript that is still
+                    # definitively absent after the grace period.
+                    return
+                except (PermissionError, OSError):
+                    # A transient lock or I/O error is not proof that history
+                    # was deleted. Leave the event retryable.
+                    return
                 if desktop_rollout is None:
                     # A hook can race the first JSONL write.  Keep the event in
                     # incoming so reconciliation can retry it shortly.
@@ -235,6 +265,196 @@ class DesktopMonitor:
             os.replace(path, destination)
         except FileNotFoundError:
             pass
+
+    @staticmethod
+    def _event_time(event: dict, spool_path: Path) -> datetime | None:
+        raw = event.get("observed_at")
+        if isinstance(raw, str):
+            try:
+                value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+            except ValueError:
+                pass
+        try:
+            return datetime.fromtimestamp(spool_path.stat().st_mtime, tz=timezone.utc)
+        except OSError:
+            return None
+
+    def _archive_expired_missing_transcript(
+        self, spool_path: Path, event: dict, transcript_text: str
+    ) -> bool:
+        observed_at = self._event_time(event, spool_path)
+        now = datetime.now(timezone.utc)
+        if observed_at is None or now - observed_at < MISSING_TRANSCRIPT_GRACE:
+            return False
+
+        index_path = self.paths["root"] / "spool" / "orphaned.json"
+        try:
+            if index_path.exists():
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                if not isinstance(index, dict) or index.get("version") != 1 or not isinstance(index.get("records"), list):
+                    return False
+                records = index["records"]
+            else:
+                records = []
+            cutoff = now - ORPHAN_RECORD_RETENTION
+            retained = []
+            for record in records:
+                if not isinstance(record, dict):
+                    return False
+                archived = datetime.fromisoformat(str(record["archived_at"]).replace("Z", "+00:00"))
+                if archived.tzinfo is None:
+                    archived = archived.replace(tzinfo=timezone.utc)
+                if archived.astimezone(timezone.utc) >= cutoff:
+                    retained.append(record)
+
+            event_id = str(event.get("event_id") or spool_path.stem)
+            event_hash = hashlib.sha256(event_id.encode("utf-8", errors="replace")).hexdigest()
+            if any(record.get("event_id_sha256") == event_hash for record in retained):
+                spool_path.unlink(missing_ok=True)
+                return True
+
+            hook_name = event.get("hook_event_name")
+            if not isinstance(hook_name, str) or len(hook_name) > 40:
+                hook_name = "unknown"
+            session_id = event.get("session_id")
+            if not isinstance(session_id, str) or len(session_id) > 100:
+                session_id = ""
+            turn_id = event.get("turn_id")
+            if not isinstance(turn_id, str) or len(turn_id) > 160:
+                turn_id = ""
+            retained.append({
+                "event_id_sha256": event_hash,
+                "hook_event_name": hook_name,
+                "session_id": session_id,
+                "turn_id": turn_id,
+                "observed_at": observed_at.isoformat(),
+                "transcript_path_sha256": hashlib.sha256(
+                    transcript_text.encode("utf-8", errors="replace")
+                ).hexdigest(),
+                "reason": "transcript_missing_after_grace_period",
+                "archived_at": now.isoformat(),
+            })
+            atomic_write_json(index_path, {"version": 1, "records": retained[-MAX_ORPHAN_RECORDS:]})
+            spool_path.unlink(missing_ok=True)
+            return True
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            # Never discard the source event if the diagnostic index cannot be
+            # read or durably updated. It remains available for later repair.
+            return False
+
+    @staticmethod
+    def _prune_spool_directory(path: Path, *, retention: timedelta, max_files: int, now: float) -> None:
+        entries = []
+        for entry in path.glob("*.json"):
+            try:
+                entries.append((entry.stat().st_mtime, entry))
+            except OSError:
+                continue
+        cutoff = now - retention.total_seconds()
+        retained = []
+        for modified, entry in entries:
+            if modified < cutoff:
+                try:
+                    entry.unlink()
+                except OSError:
+                    retained.append((modified, entry))
+            else:
+                retained.append((modified, entry))
+        retained.sort(key=lambda item: item[0], reverse=True)
+        for _, entry in retained[max_files:]:
+            try:
+                entry.unlink()
+            except OSError:
+                continue
+
+    @staticmethod
+    def _rotate_and_prune_log(path: Path, *, now: float) -> None:
+        if path.exists():
+            try:
+                if path.stat().st_size > MAX_ACTIVE_LOG_BYTES:
+                    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                    archived = path.with_name(f"{path.stem}-{stamp}-{os.getpid()}.jsonl")
+                    suffix = 1
+                    while archived.exists():
+                        archived = path.with_name(f"{path.stem}-{stamp}-{os.getpid()}-{suffix}.jsonl")
+                        suffix += 1
+                    os.replace(path, archived)
+                    path.touch()
+            except OSError:
+                # Keep the active log intact if another process briefly holds it.
+                pass
+
+        archives = []
+        pattern = f"{path.stem}-*.jsonl"
+        for entry in path.parent.glob(pattern):
+            try:
+                archives.append((entry.stat().st_mtime, entry))
+            except OSError:
+                continue
+        cutoff = now - ROTATED_LOG_RETENTION.total_seconds()
+        retained = []
+        for modified, entry in archives:
+            if modified < cutoff:
+                try:
+                    entry.unlink()
+                except OSError:
+                    retained.append((modified, entry))
+            else:
+                retained.append((modified, entry))
+        retained.sort(key=lambda item: item[0], reverse=True)
+        for _, entry in retained[MAX_ROTATED_LOG_FILES:]:
+            try:
+                entry.unlink()
+            except OSError:
+                continue
+
+    def _cleanup_spool_retention(self, *, now_mono: float | None = None) -> None:
+        if now_mono is None:
+            now_mono = time.monotonic()
+        if (self.last_spool_cleanup is not None
+                and now_mono - self.last_spool_cleanup < SPOOL_CLEANUP_INTERVAL_SECONDS):
+            return
+        wall_now = time.time()
+        self._prune_spool_directory(
+            self.paths["processed"], retention=PROCESSED_SPOOL_RETENTION,
+            max_files=MAX_PROCESSED_SPOOL_FILES, now=wall_now,
+        )
+        self._prune_spool_directory(
+            self.paths["failed"], retention=FAILED_SPOOL_RETENTION,
+            max_files=MAX_FAILED_SPOOL_FILES, now=wall_now,
+        )
+        outbox = self.paths["root"] / "outbox"
+        for name, retention, maximum in (
+            ("sent", SENT_OUTBOX_RETENTION, MAX_SENT_OUTBOX_FILES),
+            ("failed", FAILED_OUTBOX_RETENTION, MAX_FAILED_OUTBOX_FILES),
+            ("obsolete", OBSOLETE_OUTBOX_RETENTION, MAX_OBSOLETE_OUTBOX_FILES),
+        ):
+            self._prune_spool_directory(outbox / name, retention=retention, max_files=maximum, now=wall_now)
+        for name in ("shadow-notifications.jsonl", "delivery.jsonl"):
+            self._rotate_and_prune_log(self.paths["logs"] / name, now=wall_now)
+        index_path = self.paths["root"] / "spool" / "orphaned.json"
+        try:
+            if index_path.exists():
+                index = json.loads(index_path.read_text(encoding="utf-8"))
+                if isinstance(index, dict) and index.get("version") == 1 and isinstance(index.get("records"), list):
+                    cutoff = datetime.now(timezone.utc) - ORPHAN_RECORD_RETENTION
+                    records = []
+                    for record in index["records"]:
+                        if not isinstance(record, dict):
+                            continue
+                        archived = datetime.fromisoformat(str(record["archived_at"]).replace("Z", "+00:00"))
+                        if archived.tzinfo is None:
+                            archived = archived.replace(tzinfo=timezone.utc)
+                        if archived.astimezone(timezone.utc) >= cutoff:
+                            records.append(record)
+                    records = records[-MAX_ORPHAN_RECORDS:]
+                    if records != index["records"]:
+                        atomic_write_json(index_path, {"version": 1, "records": records})
+        except (OSError, ValueError, KeyError, TypeError, json.JSONDecodeError):
+            # A damaged diagnostic index is preserved for manual inspection.
+            pass
+        self.last_spool_cleanup = now_mono
 
     def _process_all_spool(self) -> None:
         for path in sorted(self.paths["incoming"].glob("*.json")):
@@ -273,7 +493,9 @@ class DesktopMonitor:
             self._read_transcript(path, not_before=not_before)
 
     def _reconcile(self) -> None:
+        now_mono = time.monotonic()
         self._process_all_spool()
+        self._cleanup_spool_retention(now_mono=now_mono)
         for path in self.tailer.known_paths():
             try:
                 stat = path.stat()
@@ -282,7 +504,7 @@ class DesktopMonitor:
             cursor = self.tailer.cursor_for(path)
             if cursor and stat.st_size != cursor.offset:
                 self._read_transcript(path)
-        self.last_reconciliation = time.monotonic()
+        self.last_reconciliation = now_mono
 
     def _active_runtimes(self):
         return self.machine.active_runtimes()
@@ -365,6 +587,7 @@ class DesktopMonitor:
         for watcher in self.watchers:
             watcher.start()
         self._process_all_spool()
+        self._cleanup_spool_retention()
         self._check_processes()
 
     def close(self) -> None:

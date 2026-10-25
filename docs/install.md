@@ -9,7 +9,7 @@
 - [Python 3.11+](https://www.python.org/downloads/windows/)，包含 `pythonw.exe`。
 - 自己的 QQ 官方机器人；没有时向导会提示你到 [QQ 开放平台](https://q.qq.com/) 创建。登录、实名、私聊权限、测试成员和上线要求以平台当时页面为准。
 
-使用 QQ 官方机器人私聊。AppSecret 只在本机安装窗口输入，不要发给智能体、QQ 或 GitHub。
+首次绑定使用 QQ 官方机器人私聊。群聊不是首次配置入口；完成绑定后如确有需要，再按[使用手册](usage.md)逐个授权可信群成员。AppSecret 只在本机安装窗口输入，不要发给智能体、QQ 或 GitHub。
 
 ## 一个入口
 

@@ -1,0 +1,308 @@
+diff --git a/platform/qqbot/group_access.go b/platform/qqbot/group_access.go
+new file mode 100644
+index 0000000..016d434
+--- /dev/null
++++ b/platform/qqbot/group_access.go
+@@ -0,0 +1,39 @@
++package qqbot
++
++import "strings"
++
++// QQ OpenIDs are opaque identifiers, but the platform's current values use a
++// URL-safe ASCII alphabet. Restrict the config grammar so a group/member pair
++// cannot be split or interpreted as a wildcard.
++func validGroupIdentity(groupOpenID, memberOpenID string) bool {
++	return validOpenID(groupOpenID) && validOpenID(memberOpenID)
++}
++
++func validOpenID(value string) bool {
++	if len(value) < 1 || len(value) > 128 {
++		return false
++	}
++	for _, char := range value {
++		if !(char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' ||
++			char >= '0' && char <= '9' || char == '_' || char == '-') {
++			return false
++		}
++	}
++	return true
++}
++
++// allowedGroupMember authorizes only one exact group/member pair. Empty values
++// and wildcard entries deliberately never authorize group access.
++func allowedGroupMember(allowFrom, groupOpenID, memberOpenID string) bool {
++	if !validGroupIdentity(groupOpenID, memberOpenID) {
++		return false
++	}
++	for _, item := range strings.Split(allowFrom, ",") {
++		parts := strings.Split(strings.TrimSpace(item), "/")
++		if len(parts) == 2 && validGroupIdentity(parts[0], parts[1]) &&
++			parts[0] == groupOpenID && parts[1] == memberOpenID {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/platform/qqbot/group_access_test.go b/platform/qqbot/group_access_test.go
+new file mode 100644
+index 0000000..36e8bd5
+--- /dev/null
++++ b/platform/qqbot/group_access_test.go
+@@ -0,0 +1,125 @@
++package qqbot
++
++import (
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/chenhg5/cc-connect/core"
++)
++
++const testGroupID = "group_12345678"
++const testMemberID = "member_12345678"
++
++func groupMessagePayload(id, group, member, content string) []byte {
++	data, _ := json.Marshal(map[string]any{
++		"id": id, "group_openid": group, "content": content,
++		"timestamp": time.Now().UTC().Format(time.RFC3339Nano),
++		"author": map[string]string{"member_openid": member},
++	})
++	return data
++}
++
++func TestGroupAllowListRequiresExactGroupAndMemberPair(t *testing.T) {
++	if allowedGroupMember("", testGroupID, testMemberID) ||
++		allowedGroupMember("*", testGroupID, testMemberID) ||
++		allowedGroupMember(testMemberID, testGroupID, testMemberID) {
++		t.Fatal("empty, wildcard, or private-chat-only allowlist authorized a group")
++	}
++	if !allowedGroupMember("othergroup/member_12345678,"+testGroupID+"/"+testMemberID,
++		testGroupID, testMemberID) {
++		t.Fatal("exact configured group/member pair was not authorized")
++	}
++	if allowedGroupMember(testGroupID+"/othermember", testGroupID, testMemberID) ||
++		allowedGroupMember(testGroupID+"/", testGroupID, testMemberID) {
++		t.Fatal("partial or malformed group authorization was accepted")
++	}
++}
++
++func TestGroupMessageRequiresGroupAllowListAndPreservesPerMemberSession(t *testing.T) {
++	var got *core.Message
++	p := &Platform{allowFrom: "*", handler: func(_ core.Platform, msg *core.Message) { got = msg }}
++	p.handleDispatch("GROUP_AT_MESSAGE_CREATE", groupMessagePayload(
++		"group-message-denied", testGroupID, testMemberID, "<@!bot> hello"))
++	if got != nil {
++		t.Fatal("private allowlist wildcard unexpectedly authorized group input")
++	}
++
++	p.groupAllowFrom = testGroupID + "/" + testMemberID
++	p.handleDispatch("GROUP_AT_MESSAGE_CREATE", groupMessagePayload(
++		"group-message-allowed", testGroupID, testMemberID, "<@!bot> hello"))
++	if got == nil || got.SessionKey != "qqbot:"+testGroupID+":"+testMemberID ||
++		got.UserID != testMemberID || got.Content != "hello" || got.ReplyCtx == nil || got.InboundMetadata == nil {
++		t.Fatalf("authorized group message was not routed with member-scoped context: %#v", got)
++	}
++}
++
++func TestGroupIdentityCommandRepliesLocallyWithoutCallingAgent(t *testing.T) {
++	var got *core.Message
++	var body map[string]any
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path != "/v2/groups/"+testGroupID+"/messages" {
++			t.Errorf("unexpected group reply path: %s", r.URL.Path)
++		}
++		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
++			t.Errorf("decode group reply: %v", err)
++		}
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write([]byte(`{"id":"identity-reply"}`))
++	}))
++	defer server.Close()
++	oldBase := apiBaseProduction
++	apiBaseProduction = server.URL
++	defer func() { apiBaseProduction = oldBase }()
++	p := &Platform{allowFrom: testMemberID, token: "test-token", tokenExpiry: time.Now().Add(time.Hour),
++		handler: func(_ core.Platform, msg *core.Message) { got = msg }}
++	p.handleGroupMessage(groupMessagePayload("identity-command", testGroupID, testMemberID, "<@!bot> 群聊身份"))
++	if got != nil {
++		t.Fatal("identity lookup was forwarded to the agent")
++	}
++	content, _ := body["content"].(string)
++	if !strings.Contains(content, testGroupID+"/"+testMemberID) ||
++		!strings.Contains(content, `group_allow_from = "`+testGroupID+"/"+testMemberID+`"`) {
++		t.Fatalf("identity reply omitted exact allowlist setup: %q", content)
++	}
++}
++
++func TestGroupPermissionButtonRequiresAuthorizedActorAndPair(t *testing.T) {
++	var got *core.Message
++	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write([]byte(`{}`))
++	}))
++	defer server.Close()
++	oldBase := apiBaseProduction
++	apiBaseProduction = server.URL
++	defer func() { apiBaseProduction = oldBase }()
++	p := &Platform{allowFrom: "*", groupAllowFrom: testGroupID + "/" + testMemberID,
++		token: "test-token", tokenExpiry: time.Now().Add(time.Hour),
++		handler: func(_ core.Platform, msg *core.Message) { got = msg }}
++	token := p.newPermissionToken("qqbot:"+testGroupID+":"+testMemberID, "request-1",
++		&replyContext{messageType: "group", groupOpenID: testGroupID, userOpenID: testMemberID})
++
++	wrongActor, _ := json.Marshal(map[string]any{
++		"id": "interaction-wrong-actor", "chat_type": 1, "group_openid": testGroupID,
++		"group_member_openid": "member_87654321",
++		"data": map[string]any{"resolved": map[string]string{"button_data": "perm:allow:" + token}},
++	})
++	p.handleInteractionCreate(wrongActor)
++	if got != nil {
++		t.Fatal("unauthorized group actor reached the agent")
++	}
++
++	authorized, _ := json.Marshal(map[string]any{
++		"id": "interaction-authorized", "chat_type": 1, "group_openid": testGroupID,
++		"group_member_openid": testMemberID,
++		"data": map[string]any{"resolved": map[string]string{"button_data": "perm:allow:" + token}},
++	})
++	p.handleInteractionCreate(authorized)
++	if got == nil || got.PermissionRequestID != "request-1" || got.UserID != testMemberID || got.ReplyCtx == nil {
++		t.Fatalf("authorized group permission response was not routed: %#v", got)
++	}
++}
+diff --git a/platform/qqbot/qqbot.go b/platform/qqbot/qqbot.go
+index 2c87221..562f496 100644
+--- a/platform/qqbot/qqbot.go
++++ b/platform/qqbot/qqbot.go
+@@ -68,6 +68,7 @@ type Platform struct {
+ 	appSecret             string
+ 	sandbox               bool
+ 	allowFrom             string
++	groupAllowFrom        string
+ 	shareSessionInChannel bool
+ 	intents               int
+ 	markdownSupport       bool // enable markdown messages (msg_type: 2)
+@@ -174,6 +175,7 @@ func New(opts map[string]any) (core.Platform, error) {
+ 
+ 	sandbox, _ := opts["sandbox"].(bool)
+ 	allowFrom, _ := opts["allow_from"].(string)
++	groupAllowFrom, _ := opts["group_allow_from"].(string)
+ 	shareSessionInChannel, _ := opts["share_session_in_channel"].(bool)
+ 	markdownSupport, _ := opts["markdown_support"].(bool)
+ 
+@@ -191,6 +193,7 @@ func New(opts map[string]any) (core.Platform, error) {
+ 		appSecret:             appSecret,
+ 		sandbox:               sandbox,
+ 		allowFrom:             allowFrom,
++		groupAllowFrom:        strings.TrimSpace(groupAllowFrom),
+ 		shareSessionInChannel: shareSessionInChannel,
+ 		intents:               intents,
+ 		markdownSupport:       markdownSupport,
+@@ -1053,10 +1056,7 @@ func (p *Platform) sendResume(conn *websocket.Conn, token string) error {
+ func (p *Platform) handleDispatch(eventType string, data json.RawMessage) {
+ 	switch eventType {
+ 	case "GROUP_AT_MESSAGE_CREATE":
+-		// Codex-QQ is intentionally private-chat only. Keep the upstream group
+-		// intent for compatibility, but never route group input into the local
+-		// controller or the general agent.
+-		slog.Debug("qqbot: ignoring group message for Codex-QQ private-chat adapter")
++		p.handleGroupMessage(data)
+ 	case "C2C_MESSAGE_CREATE":
+ 		p.handleC2CMessage(data)
+ 	case "INTERACTION_CREATE":
+@@ -1152,10 +1152,10 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
+ 	var userID, groupID, chatType string
+ 	switch d.ChatType {
+ 	case 1: // group
+-		// Permission interactions are private-chat only as well; never allow a
+-		// group button to resolve a local Codex request.
+-		slog.Debug("qqbot: ignoring group permission interaction")
+-		return
++		chatType = "group"
++		userID, groupID = d.GroupMemberOpenID, d.GroupOpenID
++		rctx = &replyContext{messageType: "group", groupOpenID: groupID,
++			userOpenID: userID, sessionKey: sessionKey}
+ 	case 2: // c2c
+ 		chatType = "c2c"
+ 		rctx = &replyContext{
+@@ -1168,7 +1168,11 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
+ 		slog.Warn("qqbot: unknown interaction chat_type", "chat_type", d.ChatType)
+ 		return
+ 	}
+-	if !core.AllowList(p.allowFrom, userID) {
++	allowed := core.AllowList(p.allowFrom, userID)
++	if chatType == "group" {
++		allowed = allowedGroupMember(p.groupAllowFrom, groupID, userID)
++	}
++	if !allowed {
+ 		slog.Warn("qqbot: unauthorized interaction ignored", "user_present", userID != "")
+ 		return
+ 	}
+@@ -1283,7 +1287,7 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
+ 		return
+ 	}
+ 
+-	if d.ID == "" || d.GroupOpenID == "" {
++	if d.ID == "" || !validGroupIdentity(d.GroupOpenID, d.Author.MemberOpenID) {
+ 		return
+ 	}
+ 
+@@ -1300,12 +1304,28 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
+ 		return
+ 	}
+ 
+-	if !core.AllowList(p.allowFrom, d.Author.MemberOpenID) {
++	// Strip leading @bot mention (the official API includes it as content prefix)
++	content := stripAtMention(d.Content)
++	sessionKey := fmt.Sprintf("qqbot:%s:%s", d.GroupOpenID, d.Author.MemberOpenID)
++	rctx := &replyContext{messageType: "group", groupOpenID: d.GroupOpenID,
++		userOpenID: d.Author.MemberOpenID, eventMsgID: d.ID, sessionKey: sessionKey}
++	if content == "群聊身份" {
++		if !core.AllowList(p.allowFrom, d.Author.MemberOpenID) {
++			return
++		}
++		// This local, read-only command lets an owner opt in one exact member in
++		// one exact group. It never reaches the ACP agent or Codex controller.
++		reply := fmt.Sprintf("群聊身份（仅用于精确授权）：\n群号：%s\n成员：%s\n\n将下面这行添加到机器人配置的 QQ 平台选项中，保存后重启助手：\ngroup_allow_from = %q\n\n群聊回复会被群内成员看到，请只在可信群使用。",
++			d.GroupOpenID, d.Author.MemberOpenID, d.GroupOpenID+"/"+d.Author.MemberOpenID)
++		if err := p.Send(context.Background(), rctx, reply); err != nil {
++			slog.Warn("qqbot: failed to send group identity help", "error", err)
++		}
++		return
++	}
++	if !allowedGroupMember(p.groupAllowFrom, d.GroupOpenID, d.Author.MemberOpenID) {
+ 		return
+ 	}
+ 
+-	// Strip leading @bot mention (the official API includes it as content prefix)
+-	content := stripAtMention(d.Content)
+ 	quotedText := p.resolveQuotedText(d.MessageReference)
+ 	if quotedText == "" && d.MessageType != nil && *d.MessageType == msgTypeQuote {
+ 		quotedText = quotedTextFromElements(d.MsgElements)
+@@ -1319,20 +1339,13 @@ func (p *Platform) handleGroupMessage(data json.RawMessage) {
+ 		return
+ 	}
+ 
+-	var sessionKey string
+ 	if p.shareSessionInChannel {
+ 		sessionKey = fmt.Sprintf("qqbot:g:%s", d.GroupOpenID)
+ 	} else {
+ 		sessionKey = fmt.Sprintf("qqbot:%s:%s", d.GroupOpenID, d.Author.MemberOpenID)
+ 	}
+ 
+-	rctx := &replyContext{
+-		messageType: "group",
+-		groupOpenID: d.GroupOpenID,
+-		userOpenID:  d.Author.MemberOpenID,
+-		eventMsgID:  d.ID,
+-		sessionKey:  sessionKey,
+-	}
++	rctx.sessionKey = sessionKey
+ 
+ 	msg := &core.Message{
+ 		SessionKey:      sessionKey,
+

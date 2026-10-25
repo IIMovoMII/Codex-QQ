@@ -21,6 +21,7 @@ class PublicSetupTests(unittest.TestCase):
         self.assertEqual(Path(project['agent']['options']['cmd'][-1]).name, 'pairing_agent.py')
         self.assertIn('shell', project['disabled_commands'])
         self.assertEqual(project['admin_from'], '__no_remote_admin__')
+        self.assertEqual(project['platforms'][0]['options']['group_allow_from'], '')
         self.assertNotIn('qq_desktop_bridge.py', text)
 
     def test_first_setup_and_explicit_binding_never_overwrite_existing_install(self):

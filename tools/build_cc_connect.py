@@ -74,11 +74,11 @@ def main() -> None:
     joined = ','.join(tags)
     verify_dependencies(run(args.go, ['list', '-deps', '-tags', joined, './cmd/cc-connect'], args.source))
     # Compile every ACP/QQ test, then run the focused permission-token,
-    # identity, and control-footer regression cases used by this adapter.
+    # identity, group, and control-footer regression cases used by this adapter.
     run_checked(args.go, ['test', './agent/acp'], args.source)
     run_checked(args.go, ['test', './platform/qqbot', '-run', '^$'], args.source)
     run_checked(args.go, ['test', './platform/qqbot', '-run',
-                          '^(TestPermissionButton|TestNewPermissionRequest|TestControlFooter|TestC2CMessagesWithoutUserIdentity)'],
+                          '^(TestPermissionButton|TestNewPermissionRequest|TestControlFooter|TestC2CMessagesWithoutUserIdentity|TestGroup)'],
                 args.source)
     run_checked(args.go, ['test', './core', '-run',
                           '^(TestMetadataDispatchPreservesQueuedEventIdentity|TestHandlePendingPermission_StalePermissionCallback_Dropped)$'],

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -265,6 +267,128 @@ class MonitorRaceTests(unittest.TestCase):
             self.assertEqual(monitor.machine.active_runtimes(), [])
             self.assertEqual(monitor.control_status['s'], {'turn_id': 'current', 'state': 'disconnected'})
             self.assertFalse(monitor.exit_requested)
+
+
+class SpoolRetentionTests(unittest.TestCase):
+    def _monitor(self, root: Path) -> DesktopMonitor:
+        return DesktopMonitor(MonitorConfig(codex_home=root / "codex", data_dir=root / "runtime"))
+
+    def _write_event(self, monitor: DesktopMonitor, *, event_id: str, observed_at: datetime,
+                     transcript: Path, body: str = "private payload") -> Path:
+        path = monitor.paths["incoming"] / f"{event_id}.json"
+        path.write_text(json.dumps({
+            "event_id": event_id,
+            "observed_at": observed_at.isoformat(),
+            "hook_event_name": "Stop",
+            "session_id": "session-test",
+            "turn_id": "turn-test",
+            "transcript_path": str(transcript),
+            "assistant_text": body,
+        }), encoding="utf-8")
+        return path
+
+    def test_recent_missing_transcript_stays_retryable(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor = self._monitor(root)
+            path = self._write_event(monitor, event_id="recent", observed_at=datetime.now(timezone.utc),
+                                     transcript=root / "not-yet-created.jsonl")
+
+            monitor._process_spool_file(path)
+
+            self.assertTrue(path.exists())
+            self.assertFalse((monitor.paths["root"] / "spool" / "orphaned.json").exists())
+            self.assertFalse(list(monitor.paths["failed"].glob("*.json")))
+
+    def test_expired_definitely_missing_transcript_is_archived_without_payload_or_path(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor = self._monitor(root)
+            transcript = root / "private" / "conversation.jsonl"
+            path = self._write_event(monitor, event_id="expired", observed_at=datetime.now(timezone.utc) - timedelta(days=8),
+                                     transcript=transcript, body="do not retain this prompt")
+
+            monitor._process_spool_file(path)
+
+            self.assertFalse(path.exists())
+            index_path = monitor.paths["root"] / "spool" / "orphaned.json"
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            self.assertEqual(index["version"], 1)
+            self.assertEqual(len(index["records"]), 1)
+            row = index["records"][0]
+            self.assertEqual(row["reason"], "transcript_missing_after_grace_period")
+            self.assertNotIn("do not retain this prompt", index_path.read_text(encoding="utf-8"))
+            self.assertNotIn(str(transcript), index_path.read_text(encoding="utf-8"))
+            self.assertNotIn("assistant_text", row)
+
+    def test_transient_transcript_permission_error_does_not_archive_or_fail_event(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor = self._monitor(root)
+            path = self._write_event(monitor, event_id="locked", observed_at=datetime.now(timezone.utc) - timedelta(days=30),
+                                     transcript=root / "locked.jsonl")
+            with patch("monitor.is_desktop_rollout", side_effect=PermissionError("locked")):
+                monitor._process_spool_file(path)
+
+            self.assertTrue(path.exists())
+            self.assertFalse(list(monitor.paths["failed"].glob("*.json")))
+            self.assertFalse((monitor.paths["root"] / "spool" / "orphaned.json").exists())
+
+    def test_cleanup_runs_at_startup_and_applies_age_and_count_bounds(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor = self._monitor(root)
+            now = time.time()
+            for name, age in (("old.json", 10 * 86400), ("new-a.json", 1),
+                              ("new-b.json", 2), ("new-c.json", 3)):
+                path = monitor.paths["processed"] / name
+                path.write_text("{}", encoding="utf-8")
+                os.utime(path, (now - age, now - age))
+            expired_failure = monitor.paths["failed"] / "old-failure.json"
+            expired_failure.write_text("{}", encoding="utf-8")
+            os.utime(expired_failure, (now - 31 * 86400, now - 31 * 86400))
+
+            with patch("monitor.MAX_PROCESSED_SPOOL_FILES", 2), patch("monitor.time.monotonic", return_value=100):
+                monitor._cleanup_spool_retention()
+
+            names = {path.name for path in monitor.paths["processed"].glob("*.json")}
+            self.assertEqual(names, {"new-a.json", "new-b.json"})
+            self.assertFalse(expired_failure.exists())
+            self.assertEqual(monitor.last_spool_cleanup, 100)
+
+    def test_cleanup_interval_prevents_repeated_directory_scans(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor = self._monitor(root)
+            monitor.last_spool_cleanup = 100
+            with patch("monitor.time.monotonic", return_value=101), patch.object(
+                    monitor, "_prune_spool_directory") as prune:
+                monitor._cleanup_spool_retention()
+            prune.assert_not_called()
+
+    def test_cleanup_bounds_outbox_and_rotates_large_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor = self._monitor(root)
+            now = time.time()
+            for name in ("sent", "failed", "obsolete"):
+                folder = monitor.paths["root"] / "outbox" / name
+                folder.mkdir(parents=True, exist_ok=True)
+                old = folder / "old.json"
+                old.write_text("{}", encoding="utf-8")
+                os.utime(old, (now - 31 * 86400, now - 31 * 86400))
+            shadow = monitor.paths["logs"] / "shadow-notifications.jsonl"
+            shadow.write_text("x" * (8 * 1024 * 1024 + 1), encoding="utf-8")
+
+            monitor._cleanup_spool_retention()
+
+            self.assertFalse((monitor.paths["root"] / "outbox" / "sent" / "old.json").exists())
+            self.assertFalse((monitor.paths["root"] / "outbox" / "failed" / "old.json").exists())
+            self.assertFalse((monitor.paths["root"] / "outbox" / "obsolete" / "old.json").exists())
+            self.assertTrue(shadow.exists())
+            rotated = list(monitor.paths["logs"].glob("shadow-notifications-*.jsonl"))
+            self.assertEqual(len(rotated), 1)
+            self.assertEqual(shadow.stat().st_size, 0)
 
 
 if __name__ == "__main__":
