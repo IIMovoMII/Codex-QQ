@@ -195,13 +195,31 @@ class ControlRouterTests(unittest.TestCase):
 
     def test_bridge_restart_rejects_event_buffered_before_new_bridge_generation(self):
         card = self.send('/use ' + THREAD_A)
-        buffered_at = time.time()
         restarted = ControlRouter(self.store, FakeCatalog(), self.backend,
                                    lambda t, text: (self.calls.append((t, text)) or True, ""))
+        # Simulate an event buffered before this bridge instance started.
+        buffered_at = restarted._process_started_at - 1.0
         params = self.request('继续', quote=card, message_id='before-bridge-restart',
                               timestamp=buffered_at)
         self.assertIn('作废', restarted.handle(params))
         self.assertEqual(self.calls, [])
+
+    def test_bridge_state_store_failure_fails_closed_before_dispatch(self):
+        with patch.object(self.store, 'begin_bridge_session', side_effect=sqlite3.OperationalError('locked')):
+            with patch.object(self.backend, 'probe') as probe:
+                self.assertIn('本地控制状态暂不可用', self.send('继续'))
+                probe.assert_not_called()
+        self.assertEqual(self.calls, [])
+
+    def test_backend_call_forwards_expected_connection_alias(self):
+        observed = []
+        class ExpectedConnectionBackend:
+            def read_settings(self, thread_id, expected_connection=None):
+                observed.append((thread_id, expected_connection))
+                return {}
+        router = ControlRouter(self.store, FakeCatalog(), ExpectedConnectionBackend(), lambda *_: (True, ''))
+        self.assertEqual(router._backend_call('read_settings', THREAD_A, connection='generation-a'), {})
+        self.assertEqual(observed, [(THREAD_A, 'generation-a')])
 
     def test_bridge_restart_for_one_qq_session_does_not_invalidate_another(self):
         with patch.dict(os.environ, {'CC_SESSION_KEY': 'qqbot:other'}, clear=False):

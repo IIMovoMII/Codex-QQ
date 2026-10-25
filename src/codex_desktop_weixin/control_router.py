@@ -85,7 +85,13 @@ class ControlRouter:
         # even when Desktop and its process identity remain unchanged. Keep
         # the cutoff scoped so another user's ACP process is not invalidated.
         if scope not in self._bridge_scopes:
-            self.store.begin_bridge_session(scope, now=self._process_started_at)
+            try:
+                self.store.begin_bridge_session(scope, now=self._process_started_at)
+            except (OSError, sqlite3.Error):
+                # Keep the existing state and fail closed just like later
+                # event-state writes. A locked/corrupt store must not allow
+                # an untracked native mutation or crash the ACP request.
+                return '本地控制状态暂不可用，未执行这条指令；没有清空或重建已有状态。'
             self._bridge_scopes.add(scope)
         try:
             sent_at = float(meta["sent_at_ms"]) / 1000
@@ -154,14 +160,17 @@ class ControlRouter:
 
     def _backend_call(self, name: str, *args: Any, connection: str | None = None) -> Any:
         method = getattr(self.backend, name)
+        parameters = {}
         try:
             parameters = inspect.signature(method).parameters
-            supports_connection = ('connection' in parameters
+            supports_connection = ('connection' in parameters or 'expected_connection' in parameters
                                    or any(p.kind is inspect.Parameter.VAR_POSITIONAL
                                           for p in parameters.values()))
         except (TypeError, ValueError):
             supports_connection = True
         if connection is not None and supports_connection:
+            if 'expected_connection' in parameters and 'connection' not in parameters:
+                return method(*args, expected_connection=connection)
             return method(*args, connection)
         return method(*args)
 
@@ -380,7 +389,7 @@ class ControlRouter:
         if extended is not None:
             return extended
         if command in ("模型", "思考档位"):
-            before = self.backend.read_settings(thread_id)
+            before = self._backend_call('read_settings', thread_id, connection=meta['_desktop_identity'])
             try:
                 catalog = self.catalog.models()
             except (OSError, ValueError, KeyError, TypeError):
@@ -405,7 +414,7 @@ class ControlRouter:
             return self._setting_options_card(scope, row, field, {k: before.get(k) for k in ("model", "effort")}, options,
                                               catalog["source"], connection=meta['_desktop_identity']), "confirmed"
         if command in ("设置", "/current", "/当前"):
-            view = self.backend.read_settings(thread_id)
+            view = self._backend_call('read_settings', thread_id, connection=meta['_desktop_identity'])
             stored_sandbox = row.get("sandbox_policy") or "{}"
             try:
                 stored_sandbox = json.loads(stored_sandbox) if isinstance(stored_sandbox, str) else stored_sandbox

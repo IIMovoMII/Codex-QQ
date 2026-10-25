@@ -43,7 +43,7 @@ class NativeBackend:
         result = self.native_tools().create(source_thread_id, project, prompt, title, connection, operation_id)
         if result.get('thread_id'):
             try:
-                settings = self.read_settings(result['thread_id'])
+                settings = self.read_settings(result['thread_id'], expected_connection=connection)
                 result['settings'] = {k: settings.get(k) for k in ('model', 'effort')}
             except (DesktopControlError, OSError, TimeoutError, ValueError):
                 # Creation already happened. A setting lookup is never a reason
@@ -68,12 +68,20 @@ class NativeBackend:
             self.process_image = image
             return identity, created
 
-    def snapshot(self, thread_id: str) -> dict[str, Any]:
+    @staticmethod
+    def _check_connection(pipe: Any, expected_connection: str | None) -> None:
+        """Reject reads from a Desktop process generation different from the card."""
+        if expected_connection is not None and hasattr(pipe, 'handle'):
+            if pipe_server_identity(pipe)[0] != expected_connection:
+                raise DesktopControlError('desktop-generation-changed-during-read')
+
+    def snapshot(self, thread_id: str, expected_connection: str | None = None) -> dict[str, Any]:
         with self.pipe_factory() as pipe:
             if hasattr(pipe, "deadline"):
                 pipe.deadline = min(pipe.deadline, time.monotonic() + 3.0)
             client = DesktopClient(pipe)
             client.initialize()
+            self._check_connection(pipe, expected_connection)
             owner = client.owner(thread_id)
             client.following(thread_id, True, owner)
             try:
@@ -89,6 +97,7 @@ class NativeBackend:
                             and event.get('sourceClientId') == owner and event.get('version') == 11
                             and change.get('type') == 'snapshot' and isinstance(state, dict)
                             and state.get('id') == thread_id):
+                        self._check_connection(pipe, expected_connection)
                         return {**self._view(state), 'owner_id': owner}
                     frame = pipe.read()
                     if frame.get("type") == "broadcast":
@@ -127,14 +136,16 @@ class NativeBackend:
             return "未载入或当前不可连接"
         return "已载入，状态未记录"
 
-    def read_settings(self, thread_id: str) -> dict[str, Any]:
+    def read_settings(self, thread_id: str, expected_connection: str | None = None) -> dict[str, Any]:
         with self.pipe_factory() as pipe:
             client = DesktopClient(pipe)
             client.initialize()
+            self._check_connection(pipe, expected_connection)
             owner = client.owner(thread_id)
             response = client.request("thread-follower-read-model-settings", {"conversationId": thread_id}, version=1, target_client_id=owner)
             if response.get("handledByClientId") != owner:
                 raise DesktopControlError("owner-mismatch")
+            self._check_connection(pipe, expected_connection)
             value = response["result"].get("settings")
             if not isinstance(value, dict):
                 raise DesktopControlError("invalid-settings")
@@ -149,7 +160,7 @@ class NativeBackend:
         """
         if not changes or set(changes) - {"model", "effort"} or not all(isinstance(v, str) and v for v in changes.values()):
             return {"state": "rejected", "reply": "设置字段不合法，未修改。"}
-        before = self.read_settings(thread_id)
+        before = self.read_settings(thread_id, expected_connection=connection)
         if connection is not None:
             try:
                 if self.probe()[0] != connection:
@@ -169,7 +180,7 @@ class NativeBackend:
         if result["result"].get("applied") is not True:
             return {"state": "rejected", "reply": "窗口没有接受这次设置修改；请重新查看设置。"}
         try:
-            after = self.read_settings(thread_id)
+            after = self.read_settings(thread_id, expected_connection=connection)
         except (DesktopControlError, TimeoutError, OSError, ValueError):
             return {"state": "unknown", "reply": "窗口已受理，但回读没有确认。不会重复修改，请在电脑查看。"}
         if not all(after.get(k) == v for k, v in changes.items()):
@@ -253,7 +264,7 @@ class NativeBackend:
         lock = self._queue_locks.setdefault(thread_id, threading.Lock())
         with lock:
             try:
-                current = self.snapshot(thread_id)
+                current = self.snapshot(thread_id, expected_connection=connection)
                 if self._message_route(current) != 'queued':
                     return {'state': 'rejected', 'reply': '对话状态已变化，这条消息未发送、未排队；请重新查询后发送。'}
                 identity, _ = self.probe()
@@ -323,7 +334,7 @@ class NativeBackend:
                 raise ValueError('invalid-message')
         except (ValueError, UnicodeError, TypeError):
             return {'state': 'rejected', 'reply': '消息或编号格式无效，未发送；请重新输入原文。'}
-        before = self.control_state(thread_id)
+        before = self.control_state(thread_id, connection=connection)
         identity, _ = self.probe()
         if identity != connection:
             return {'state': 'rejected', 'reply': 'Codex 连接已变化，这条消息未发送；恢复后请重新发。'}
@@ -334,7 +345,7 @@ class NativeBackend:
                 check_queue_contract(self.process_image or '')
             # Re-read immediately before an idle start. A newly busy owner gets
             # a queue submission; this is a pre-dispatch choice, never a retry.
-            current = self.snapshot(thread_id)
+            current = self.snapshot(thread_id, expected_connection=connection)
             if current['owner_id'] != before['owner_id']:
                 return {'state': 'rejected', 'reply': '对话所有者已变化，未发送。请恢复连接后重新发。'}
             before, route = current, self._message_route(current)
@@ -378,7 +389,7 @@ class NativeBackend:
             text.encode('utf-8', errors='strict')
             if not 1 <= len(text.strip()) <= 4000:
                 raise ValueError('invalid-steer-text')
-            before = self.control_state(thread_id)
+            before = self.control_state(thread_id, connection=connection)
             current_identity, _ = self.probe()
             if current_identity != connection:
                 raise DesktopControlError('desktop-generation-changed')
@@ -420,7 +431,7 @@ class NativeBackend:
 
     def fork_boundary(self, thread_id: str, connection: str) -> dict:
         from control_actions import signature
-        state = self.control_state(thread_id)
+        state = self.control_state(thread_id, connection=connection)
         if (not state.get('goal_known') or state.get('goal') is not None or state.get('pending')
                 or state['turn'].get('status') != 'completed' or state.get('requests')
                 or (state.get('runtime') or {}).get('type') == 'active'):
@@ -446,7 +457,7 @@ class NativeBackend:
         try:
             source_after = self.fork_boundary(thread_id, connection)
             child_boundary = self.native_tools().boundary(ident, connection)
-            child = self.control_state(ident)
+            child = self.control_state(ident, connection=connection)
             if (source_after != baseline or child_boundary['turn_id'] != baseline['boundary']['turn_id']
                     or not child.get('goal_known') or child.get('goal') is not None
                     or child['turn'].get('turnId') != child_boundary['turn_id']
@@ -501,9 +512,9 @@ class NativeBackend:
         except (AttributeError, OSError, TimeoutError, DesktopControlError, ValueError) as error:
             return {"state": "unknown" if sent else "rejected", "error": str(error)[:120]}
 
-    def control_state(self, thread_id: str) -> dict:
+    def control_state(self, thread_id: str, connection: str | None = None) -> dict:
         self.require_extended_contract()
-        return self.snapshot(thread_id)
+        return self.snapshot(thread_id, expected_connection=connection)
 
     def submission_status(self, receipt: dict, catalog: Any, connection: str) -> dict:
         from submission_receipts import observed_status
@@ -518,7 +529,8 @@ class NativeBackend:
                 self.contract_check()
         except (DesktopControlError, OSError, TimeoutError, ValueError, KeyError):
             return {'status': 'unconfirmed', 'client_id': receipt.get('client_id'), 'turn_id': None}
-        return observed_status(receipt, catalog.queue_path, self.snapshot)
+        return observed_status(receipt, catalog.queue_path,
+                                lambda thread_id: self.snapshot(thread_id, expected_connection=connection))
 
     def remove_submission(self, receipt: dict, catalog: Any, connection: str) -> dict:
         """Native single-item removal, never a database deletion or delete-then-steer."""
@@ -531,7 +543,7 @@ class NativeBackend:
                                       text_digest=receipt['text_digest'])
             if queued is None or not queued['payload_verified']:
                 raise ValueError('queue-item-no-longer-verified')
-            before = self.snapshot(receipt['thread_id'])
+            before = self.snapshot(receipt['thread_id'], expected_connection=connection)
         except (OSError, TimeoutError, ValueError, DesktopControlError, sqlite3.Error):
             return {'state': 'rejected', 'reply': '原排队记录已变化或窗口无法核实，未删除；请重新查询状态。'}
         result = self.call(receipt['thread_id'], 'thread-follower-remove-queued-message',
@@ -554,7 +566,7 @@ class NativeBackend:
         current = next((x for x in catalog.saved_queue(thread_id) if x['id'] == entry['id']), None)
         if current is None or current['digest'] != entry['digest'] or current['status'] != 'queued':
             return {'state': 'rejected', 'reply': '这条排队消息已开始、变化或不再存在，未删除。请重新查看队列。'}
-        before = self.snapshot(thread_id)
+        before = self.snapshot(thread_id, expected_connection=connection)
         result = self.call(thread_id, 'thread-follower-remove-queued-message', {'messageId': entry['id']}, 1,
                            expected_owner=before['owner_id'], expected_connection=connection)
         if result['state'] != 'confirmed':
@@ -571,7 +583,7 @@ class NativeBackend:
     def respond_to_request(self, data: dict, text: str) -> dict:
         self.require_extended_contract()
         from control_actions import request_payload, signature, REQUEST_METHODS
-        state = self.snapshot(data['thread_id'])
+        state = self.snapshot(data['thread_id'], expected_connection=data.get('connection'))
         if state['owner_id'] != data['owner_id']:
             return {'state': 'rejected', 'reply': '原请求的窗口所有者已变化，请重新查询待办。'}
         matches = [r for r in state['requests'] if isinstance(r, dict) and r.get('id') == data['request_id'] and r.get('method') == data['method']]
@@ -601,7 +613,7 @@ class NativeBackend:
                 or not isinstance(changes.get('sandboxPolicy'), dict)
                 or changes['sandboxPolicy'].get('type') not in ('readOnly', 'workspaceWrite', 'dangerFullAccess')):
             return {'state': 'rejected', 'reply': '权限组合不合法，未修改。'}
-        before = self.snapshot(thread_id)
+        before = self.snapshot(thread_id, expected_connection=connection)
         from control_actions import signature
         current = before.get('settings') or {}
         effective = {**(before.get('permissions') or {}), **{k: v for k, v in current.items()
@@ -616,7 +628,7 @@ class NativeBackend:
         if result['state'] != 'confirmed' or result['result'].get('applied') is not True:
             return {'state': result['state'] if result['state'] != 'confirmed' else 'rejected', 'reply': '权限没有得到有效确认；可能已生效时不会重复修改，请查看电脑。'}
         try:
-            after = self.snapshot(thread_id)
+            after = self.snapshot(thread_id, expected_connection=connection)
             saved = after.get('settings') or {}
             if not all(saved.get(k) == v for k, v in changes.items()):
                 raise DesktopControlError('permissions-readback-mismatch')
@@ -625,7 +637,7 @@ class NativeBackend:
         return {'state': 'confirmed', 'reply': '权限已保存并回读确认，仅影响此对话后续轮次，当前任务不变。'}
 
     def compact(self, thread_id: str, connection: str | None = None) -> dict:
-        before = self.control_state(thread_id)
+        before = self.control_state(thread_id, connection=connection)
         if (before['turn'].get('status') == 'inProgress' or before.get('pending')
                 or (before.get('runtime') or {}).get('type') == 'active' or before['requests']):
             return {'state': 'rejected', 'reply': '对话正在运行或等待处理，未压缩。请等本轮结束后再试。'}

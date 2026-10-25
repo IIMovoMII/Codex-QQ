@@ -50,7 +50,7 @@ class MessageSubmissionTests(unittest.TestCase):
         self.pipe = StartPipe(result={'result': {'turn': {'id': TURN, 'status': 'inProgress'}}}, fail_method=START)
         self.state = {**idle_state(), 'resumeState': 'resumed', 'mode': 'default', 'thread_start_kind': 'default'}
         self.backend = NativeBackend(pipe_factory=lambda: self.pipe, contract_check=lambda: None)
-        self.backend.snapshot = lambda _: copy.deepcopy(self.state)
+        self.backend.snapshot = lambda _, expected_connection=None: copy.deepcopy(self.state)
         self.backend.probe = lambda: ('same-desktop', 1)
         self.queue = Mock(return_value=(True, 'queue acknowledgement'))
 
@@ -187,7 +187,7 @@ class MessageSubmissionTests(unittest.TestCase):
         state = {**self.state, 'turn': {'turnId': TURN, 'status': 'inProgress'},
                  'runtime': {'type': 'active'}}
         backend = NativeBackend(pipe_factory=lambda: pipe, contract_check=lambda: None, catalog=catalog)
-        backend.snapshot = lambda _thread: copy.deepcopy(state)
+        backend.snapshot = lambda _thread, expected_connection=None: copy.deepcopy(state)
         backend.probe = lambda: ('same-desktop', 1)
         with patch('control_backend.pipe_server_identity', return_value=('same-desktop', 1, 'Codex.exe')):
             result = backend.submit_message(THREAD, '忙时中文😀', 'same-desktop', CLIENT, self.queue)

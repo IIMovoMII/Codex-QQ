@@ -36,14 +36,17 @@ class ActionCommands:
         production backend receives the connection generation at the IPC
         boundary."""
         method = getattr(self.r.backend, name)
+        parameters = {}
         try:
             parameters = inspect.signature(method).parameters
-            supports_connection = ('connection' in parameters
+            supports_connection = ('connection' in parameters or 'expected_connection' in parameters
                                    or any(p.kind is inspect.Parameter.VAR_POSITIONAL
                                           for p in parameters.values()))
         except (TypeError, ValueError):
             supports_connection = True
         if connection is not None and supports_connection:
+            if 'expected_connection' in parameters and 'connection' not in parameters:
+                return method(*args, expected_connection=connection)
             return method(*args, connection)
         return method(*args)
 
@@ -97,7 +100,7 @@ class ActionCommands:
             return self._list('queue_list', thread_id, entries,
                               '本地已保存的排队记录（可能不含服务端队列；状态以原生处理为准）'), 'confirmed'
         if command in ('待办', '问题', '审批'):
-            state = self.r.backend.control_state(thread_id)
+            state = self._backend_call('control_state', thread_id, connection=self.connection)
             entries, unsupported = [], int(bool(state.get('async_questions_unverified')))
             for request in state['requests'][:30]:
                 try:
@@ -120,7 +123,7 @@ class ActionCommands:
                 note += '\n另有不支持的请求，请在电脑处理。'
             return self._list('request_list', thread_id, entries, note), 'confirmed'
         if command == '权限':
-            state = self.r.backend.control_state(thread_id)
+            state = self._backend_call('control_state', thread_id, connection=self.connection)
             effective = self._permissions(state)
             profile = effective.get('activePermissionProfile')
             if profile and (not isinstance(profile, dict) or not str(profile.get('id', '')).startswith(':')):
@@ -224,7 +227,7 @@ class ActionCommands:
                 return self.card('queued', {'thread_id': thread_id, 'entry': entry,
                                             'connection': self.connection},
                                  f"待发送记录：{entry['summary']}\n状态：{self.queue_status(entry['status'])}\n引用回复“引导 内容”补充当前正在运行的任务；回复“删除”移除这一条排队消息。引导不会删除或改写本条队列消息。"), 'confirmed'
-            state = self.r.backend.control_state(thread_id)
+            state = self._backend_call('control_state', thread_id, connection=self.connection)
             if entry.get('kind') == 'async_question':
                 return self._async_card(entry, state)
             request = self._find_request(entry, state)
@@ -259,7 +262,7 @@ class ActionCommands:
         if data.get('connection') != self.connection:
             return '这项操作来自旧连接，已过期。请重新查看对应选项或待办。', 'rejected'
         if kind == 'async_question':
-            state = self.r.backend.control_state(thread_id)
+            state = self._backend_call('control_state', thread_id, connection=self.connection)
             current = self._async_find(data, state)
             if current is None:
                 return '这批异步问题已回答、结束或发生变化，请重新查看待办；未发送新任务。', 'rejected'
@@ -275,7 +278,7 @@ class ActionCommands:
             return self._once(key, lambda: self._fork(data))
         if kind == 'request':
             # Validate input before claiming: a typo must not consume the request.
-            state = self.r.backend.control_state(thread_id)
+            state = self._backend_call('control_state', thread_id, connection=self.connection)
             request = self._find_request(data, state)
             if request is None:
                 return '原问题或审批已处理、过期或变化，未发起新任务。', 'rejected'
@@ -324,7 +327,7 @@ class ActionCommands:
         if kind == 'compaction':
             if text != '压缩状态':
                 return '本条用于查询压缩结果，请引用回复“压缩状态”；不会自动重复压缩。', 'rejected'
-            state = self.r.backend.control_state(thread_id)
+            state = self._backend_call('control_state', thread_id, connection=self.connection)
             if state['owner_id'] != data['owner_id']:
                 return '窗口所有者已变化，压缩结果未确认。请在电脑检查。', 'unknown'
             previous = {(x.get('id'), x.get('turn_id')) for x in data['baseline']}

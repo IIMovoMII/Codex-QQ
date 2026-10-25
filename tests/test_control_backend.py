@@ -100,6 +100,14 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(result['state'], 'rejected')
         self.assertFalse(any(x.get('method') == UPDATE for x in pipe.writes))
 
+    def test_readback_rejects_a_new_desktop_generation(self):
+        b, pipe = self.backend()
+        pipe.handle = object()
+        with patch('control_backend.pipe_server_identity', return_value=('new-desktop', 2.0, 'Codex.exe')):
+            with self.assertRaises(DesktopControlError):
+                b.read_settings(THREAD, expected_connection='old-desktop')
+        self.assertFalse(any(x.get('method') == 'thread-follower-read-model-settings' for x in pipe.writes))
+
     def test_canonical_history_extracts_latest_real_turn_without_retaining_content(self):
         state = {'turnHistory': {'kind': 'canonical', 'history': {
             'entitiesByKey': {'old': {'turnId': 'old', 'status': 'completed', 'items': [{'text': 'secret'}]}, 'new': {'turnId': 'new', 'status': 'inProgress', 'items': [{'text': 'secret'}]}},

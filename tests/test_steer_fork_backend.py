@@ -37,7 +37,7 @@ class SteerBackendTests(unittest.TestCase):
         self.state = idle_state()
         self.state['turn']['status'] = 'inProgress'
         self.backend = NativeBackend(pipe_factory=lambda: self.pipe, contract_check=lambda: None)
-        self.backend.snapshot = lambda _: copy.deepcopy(self.state)
+        self.backend.snapshot = lambda _, expected_connection=None: copy.deepcopy(self.state)
         self.backend.probe = lambda: ('same-desktop', 1.0)
 
     def send(self, text='中文😀\n先检查日志'):
@@ -126,7 +126,7 @@ class ForkBackendTests(unittest.TestCase):
             **self.boundary, 'title': '分支对话' if thread == CHILD else '源对话'}
         self.tools.fork_latest.return_value = {'state': 'confirmed', 'thread_id': CHILD}
         self.backend = NativeBackend(app_tools=self.tools, contract_check=lambda: None)
-        self.backend.snapshot = lambda thread: copy.deepcopy(self.child if thread == CHILD else self.state)
+        self.backend.snapshot = lambda thread, expected_connection=None: copy.deepcopy(self.child if thread == CHILD else self.state)
         self.baseline = self.backend.fork_boundary(THREAD, 'connection')
 
     def fork(self):
@@ -196,7 +196,7 @@ class ForkBackendTests(unittest.TestCase):
 
     def test_readback_failure_preserves_identity_without_second_mutation(self):
         before = self.backend.snapshot
-        self.backend.snapshot = lambda t: (_ for _ in ()).throw(TimeoutError()) if t == CHILD else before(t)
+        self.backend.snapshot = lambda t, expected_connection=None: (_ for _ in ()).throw(TimeoutError()) if t == CHILD else before(t)
         result = self.fork()
         self.assertEqual(result['state'], 'unknown')
         self.assertEqual(result['thread_id'], CHILD)

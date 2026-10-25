@@ -256,7 +256,7 @@ class NativeActionTests(unittest.TestCase):
         self.backend = NativeBackend(pipe_factory=lambda: self.pipe, contract_check=lambda: None)
         self.state = {'owner_id': 'desktop-owner', 'model': 'gpt-test', 'effort': 'max', 'settings': {},
                       'permissions': {}, 'requests': [], 'turn': {}, 'runtime': {}, 'compactions': []}
-        self.backend.snapshot = lambda t: copy.deepcopy(self.state)
+        self.backend.snapshot = lambda t, expected_connection=None: copy.deepcopy(self.state)
 
     def test_owner_change_before_dispatch_never_sends_mutation(self):
         result = self.backend.call(THREAD, 'mutation', {}, 1, expected_owner='old-owner')

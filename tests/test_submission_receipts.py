@@ -98,7 +98,7 @@ class ReceiptTests(QueueBase, unittest.TestCase):
 
     def test_empty_missing_corrupt_or_future_schema_is_not_started(self):
         self.queue.consume()
-        snapshot = lambda _: {'turn': {'status': 'inProgress'}, 'accepted_submissions': []}
+        snapshot = lambda _, expected_connection=None: {'turn': {'status': 'inProgress'}, 'accepted_submissions': []}
         self.assertEqual(observed_status(receipt(client_id=CLIENT), self.path, snapshot)['status'], 'unconfirmed')
         missing = Path(self.tmp.name) / 'missing.sqlite'
         self.assertEqual(observed_status(receipt(), missing, snapshot)['status'], 'unconfirmed')
@@ -167,7 +167,7 @@ class ReceiptBackendTests(QueueBase, unittest.TestCase):
     def backend(self):
         b = NativeBackend(contract_check=lambda: None)
         b.probe = lambda: ('same-process', 1)
-        b.snapshot = lambda _: {'owner_id': 'owner', 'accepted_submissions': []}
+        b.snapshot = lambda _, expected_connection=None: {'owner_id': 'owner', 'accepted_submissions': []}
         self.calls = []
         def call(thread, method, params, version, **kwargs):
             self.calls.append((thread, method, params, version))
@@ -187,9 +187,9 @@ class ReceiptBackendTests(QueueBase, unittest.TestCase):
         b = self.backend()
         catalog = type('Catalog', (), {'queue_path': self.path})()
         self.assertEqual(b.remove_submission(receipt(), catalog, 'new-process')['state'], 'rejected')
-        b.snapshot = lambda _: {'accepted_submissions': [{'client_id': CLIENT, 'turn_id': TURN}]}
+        b.snapshot = lambda _, expected_connection=None: {'accepted_submissions': [{'client_id': CLIENT, 'turn_id': TURN}]}
         self.assertEqual(b.remove_submission(receipt(), catalog, 'same-process')['state'], 'rejected')
-        b.snapshot = lambda _: {}
+        b.snapshot = lambda _, expected_connection=None: {}
         self.queue.add(payload={'new': 'field'})
         self.assertEqual(b.remove_submission(receipt(), catalog, 'same-process')['state'], 'rejected')
         self.assertEqual(self.calls, [])
