@@ -80,6 +80,35 @@ class StateMachineTests(unittest.TestCase):
         self.assertEqual(machine.apply(signal(SignalKind.USER_INPUT_REQUESTED, 1))[0].state, TurnState.WAITING_INPUT)
         self.assertEqual(machine.apply(signal(SignalKind.USER_INPUT_RESOLVED, 2)), [])
 
+    def test_session_end_retires_active_turn_without_a_completion_notice(self) -> None:
+        machine = self.new_machine()
+        self.assertEqual(
+            machine.apply(Signal(SignalKind.SESSION_ENDED, observed_at=BASE + timedelta(seconds=1),
+                                 session_id='s', source='test')),
+            [],
+        )
+        self.assertEqual(machine.active_runtimes(), [])
+        self.assertEqual(machine.active_turn_by_session, {})
+        self.assertEqual(machine.active_turns_by_session, {})
+        self.assertTrue(machine.turns[('s', 't')].terminal)
+
+    def test_waiting_notice_can_reappear_after_activity_and_a_new_request(self) -> None:
+        machine = self.new_machine()
+        self.assertEqual(len(machine.apply(signal(SignalKind.USER_INPUT_REQUESTED, 1))), 1)
+        machine.apply(signal(SignalKind.ACTIVITY, 2))
+        self.assertEqual(len(machine.apply(signal(SignalKind.USER_INPUT_REQUESTED, 3))), 1)
+
+    def test_terminal_history_is_bounded_without_scanning_old_turns(self) -> None:
+        machine = StateMachine()
+        for index in range(600):
+            turn = f'turn-{index}'
+            machine.apply(Signal(SignalKind.TURN_STARTED, observed_at=BASE, session_id='s', turn_id=turn, source='test'))
+            machine.apply(Signal(SignalKind.TURN_COMPLETED, observed_at=BASE, session_id='s', turn_id=turn,
+                                 source='test', data={'last_assistant_message': 'done'}))
+        self.assertLessEqual(len(machine.turns), 512)
+        self.assertNotIn(('s', 'turn-0'), machine.turns)
+        self.assertIn(('s', 'turn-599'), machine.turns)
+
     def test_long_silence_never_creates_notification(self) -> None:
         machine = self.new_machine()
         self.assertEqual(machine.tick(BASE + timedelta(hours=6)), [])

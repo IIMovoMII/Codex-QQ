@@ -34,6 +34,8 @@ class ControlStore:
                 CREATE TABLE IF NOT EXISTS connection(
                     key TEXT PRIMARY KEY, identity TEXT NOT NULL, ready_since REAL NOT NULL,
                     online INTEGER NOT NULL);
+                CREATE TABLE IF NOT EXISTS bridge_sessions(
+                    scope TEXT PRIMARY KEY, started REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS legacy_selections(scope TEXT PRIMARY KEY, thread_id TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS operations(
@@ -53,6 +55,25 @@ class ControlStore:
                         raise ValueError("Invalid legacy routes; preserved without migration")
                     db.executemany("INSERT OR IGNORE INTO legacy_selections VALUES(?,?)", routes.items())
                 db.execute("INSERT INTO meta VALUES('legacy_import','1')")
+
+    def begin_bridge_session(self, scope: str, *, now: float | None = None) -> float:
+        """Start a new local bridge generation and invalidate older events.
+
+        The Desktop identity can stay unchanged while the Python bridge is
+        restarted. Persisted QQ events arriving after that restart must still
+        be compared with this process' start boundary, not only the Desktop or
+        gateway readiness time.
+        """
+        started = time.time() if now is None else now
+        with self.connect() as db:
+            db.execute("INSERT INTO bridge_sessions(scope,started) VALUES(?,?) "
+                       "ON CONFLICT(scope) DO UPDATE SET started=excluded.started",
+                       (scope, started))
+        return started
+
+    @staticmethod
+    def _connection_key(scope: str | None) -> str:
+        return 'desktop' if not scope else 'desktop|' + scope
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
@@ -115,24 +136,29 @@ class ControlStore:
         with self.connect() as db:
             db.execute("UPDATE receipts SET state=?,reply=?,updated=? WHERE scope=? AND message_id=?", (state, reply[:2200], time.time(), scope, message_id))
 
-    def ready(self, identity: str, online: bool, *, now: float | None = None) -> float:
-        """Global backend identity, shared by ACP processes instead of per-prompt cutoffs."""
+    def ready(self, identity: str, online: bool, *, now: float | None = None,
+              scope: str | None = None) -> float:
+        """Record one Desktop generation for this QQ session."""
         now = time.time() if now is None else now
         with self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            old = db.execute("SELECT * FROM connection WHERE key='desktop'").fetchone()
+            key = self._connection_key(scope)
+            old = db.execute("SELECT * FROM connection WHERE key=?", (key,)).fetchone()
+            bridge_row = db.execute("SELECT started FROM bridge_sessions WHERE scope=?",
+                                    (scope,)).fetchone() if scope else None
+            bridge_cutoff = float(bridge_row[0]) if bridge_row else 0.0
             if old is not None and old["identity"] == identity and not old["online"] and online:
-                since = time.time()
+                since = max(time.time(), bridge_cutoff, old["ready_since"])
             elif old is None or old["identity"] != identity:
-                since = now
+                since = max(now, bridge_cutoff)
             else:
-                since = old["ready_since"]
-            db.execute("INSERT INTO connection VALUES('desktop',?,?,?) ON CONFLICT(key) DO UPDATE SET identity=excluded.identity,ready_since=excluded.ready_since,online=excluded.online", (identity, since, int(online)))
+                since = max(old["ready_since"], bridge_cutoff)
+            db.execute("INSERT INTO connection VALUES(?,?,?,?) ON CONFLICT(key) DO UPDATE SET identity=excluded.identity,ready_since=excluded.ready_since,online=excluded.online", (key, identity, since, int(online)))
         return since
 
-    def offline(self) -> None:
+    def offline(self, scope: str | None = None) -> None:
         with self.connect() as db:
-            db.execute("UPDATE connection SET online=0 WHERE key='desktop'")
+            db.execute("UPDATE connection SET online=0 WHERE key=?", (self._connection_key(scope),))
 
     def prune(self) -> None:
         cutoff = time.time() - 30 * 86400
@@ -140,6 +166,7 @@ class ControlStore:
             db.execute("DELETE FROM refs WHERE expires IS NOT NULL AND expires<?", (time.time(),))
             db.execute("DELETE FROM receipts WHERE updated<? AND state!='dispatching'", (cutoff,))
             db.execute("DELETE FROM operations WHERE updated<?", (cutoff,))
+            db.execute("DELETE FROM bridge_sessions WHERE started<?", (cutoff,))
 
     def claim_operation(self, scope: str, key: str) -> dict | None:
         """One-shot actions across cards/processes; unknown never means retry."""

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,6 +12,7 @@ from models import Confidence, ErrorSummary, Notification, Signal, SignalKind, T
 
 MAX_RETAINED_ASSISTANT_CHARS = 16 * 1024
 MAX_RETAINED_ERRORS = 8
+MAX_RETAINED_TERMINAL_TURNS = 512
 
 
 @dataclass
@@ -38,13 +40,27 @@ class StateMachine:
         self.stop_completion_grace = stop_completion_grace
         self.turns: dict[tuple[str, str], TurnRuntime] = {}
         self.active_turn_by_session: dict[str, str] = {}
+        # Track only unfinished turns. This preserves the old behavior of
+        # retiring every stale turn for a session without scanning all history
+        # on each new turn.
+        self.active_turns_by_session: dict[str, set[str]] = {}
         self.pending_stop_keys: set[tuple[str, str]] = set()
         self.session_context: dict[str, dict[str, str]] = {}
+        self._retired_keys: set[tuple[str, str]] = set()
+        self._retired_order: deque[tuple[str, str]] = deque()
         self.maintenance = False
 
     def _clear_active_if_matches(self, runtime: TurnRuntime) -> None:
         if self.active_turn_by_session.get(runtime.session_id) == runtime.turn_id:
             self.active_turn_by_session.pop(runtime.session_id, None)
+        active = self.active_turns_by_session.get(runtime.session_id)
+        if active is not None:
+            active.discard(runtime.turn_id)
+            if not active:
+                self.active_turns_by_session.pop(runtime.session_id, None)
+
+    def _mark_active(self, runtime: TurnRuntime) -> None:
+        self.active_turns_by_session.setdefault(runtime.session_id, set()).add(runtime.turn_id)
 
     def _retire_without_notification(self, runtime: TurnRuntime) -> None:
         """Retire a superseded/ambiguous turn without guessing its outcome."""
@@ -52,6 +68,19 @@ class StateMachine:
         self.pending_stop_keys.discard((runtime.session_id, runtime.turn_id))
         self._clear_active_if_matches(runtime)
         self._compact_runtime(runtime)
+        self._remember_retired((runtime.session_id, runtime.turn_id))
+
+    def _remember_retired(self, key: tuple[str, str]) -> None:
+        if key in self._retired_keys:
+            return
+        self._retired_keys.add(key)
+        self._retired_order.append(key)
+        while len(self._retired_order) > MAX_RETAINED_TERMINAL_TURNS:
+            old = self._retired_order.popleft()
+            self._retired_keys.discard(old)
+            runtime = self.turns.get(old)
+            if runtime is not None and runtime.terminal and old[1] not in self.active_turns_by_session.get(old[0], set()):
+                self.turns.pop(old, None)
 
     @staticmethod
     def _compact_runtime(runtime: TurnRuntime) -> None:
@@ -78,10 +107,11 @@ class StateMachine:
     def active_runtimes(self) -> list[TurnRuntime]:
         """Return at most the one current, non-terminal turn for each session."""
         result: list[TurnRuntime] = []
-        for session_id, turn_id in self.active_turn_by_session.items():
-            runtime = self.turns.get((session_id, turn_id))
-            if runtime is not None and not runtime.terminal:
-                result.append(runtime)
+        for session_id, turn_ids in self.active_turns_by_session.items():
+            for turn_id in turn_ids:
+                runtime = self.turns.get((session_id, turn_id))
+                if runtime is not None and not runtime.terminal:
+                    result.append(runtime)
         return result
 
     def _context_from_signal(self, signal: Signal) -> dict[str, str]:
@@ -115,6 +145,8 @@ class StateMachine:
         if key is None:
             return None
         runtime = self.turns.get(key)
+        if runtime is None and key in self._retired_keys:
+            return None
         if runtime is None and create:
             context = self.session_context.get(key[0], {})
             runtime = TurnRuntime(
@@ -125,6 +157,7 @@ class StateMachine:
                 model=context.get("model", ""),
             )
             self.turns[key] = runtime
+            self._mark_active(runtime)
         if runtime is not None:
             self._update_context(runtime, signal)
         return runtime
@@ -165,6 +198,7 @@ class StateMachine:
             self.maintenance = False
             return []
 
+        session = signal.session_id or "unknown-session"
         if signal.kind == SignalKind.SESSION_STARTED:
             session = signal.session_id or "unknown-session"
             context = self._context_from_signal(signal)
@@ -175,18 +209,35 @@ class StateMachine:
             }
             return []
 
-        session = signal.session_id or "unknown-session"
+        if signal.kind == SignalKind.SESSION_ENDED:
+            # SessionEnd is authoritative lifecycle cleanup, not a task
+            # result.  Without this branch a Desktop session that ends while
+            # the process remains alive leaves a permanent active mapping.
+            for (prior_session, _), runtime in tuple(self.turns.items()):
+                if prior_session == session and not runtime.terminal:
+                    self._retire_without_notification(runtime)
+            self.active_turn_by_session.pop(session, None)
+            self.active_turns_by_session.pop(session, None)
+            self.session_context.pop(session, None)
+            return []
+
         if signal.kind == SignalKind.TURN_STARTED:
             turn = signal.turn_id or f"unknown-{int(signal.observed_at.timestamp())}"
             # A Codex session has only one current turn. Old unfinished turns
             # are retired silently instead of retaining stale running state.
-            for (prior_session, prior_turn), prior_runtime in tuple(self.turns.items()):
-                if prior_session == session and prior_turn != turn and not prior_runtime.terminal:
+            if (session, turn) in self._retired_keys:
+                return []
+            for prior_turn in tuple(self.active_turns_by_session.get(session, set())):
+                if prior_turn == turn:
+                    continue
+                prior_runtime = self.turns.get((session, prior_turn))
+                if prior_runtime is not None and not prior_runtime.terminal:
                     self._retire_without_notification(prior_runtime)
             self.active_turn_by_session[session] = turn
             existing = self.turns.get((session, turn))
             if existing is not None and not existing.terminal:
                 self._update_context(existing, signal)
+                self._mark_active(existing)
                 return []
             context = self.session_context.get(session, {})
             signal_context = self._context_from_signal(signal)
@@ -198,6 +249,7 @@ class StateMachine:
                 model=signal_context["model"] or context.get("model", ""),
             )
             self.turns[(session, turn)] = runtime
+            self._mark_active(runtime)
             return []
 
         runtime = self._runtime(signal)
@@ -218,6 +270,8 @@ class StateMachine:
             # another concurrent Stop hook requested more work).
             runtime.stop_observed_at = None
             self.pending_stop_keys.discard((runtime.session_id, runtime.turn_id))
+            runtime.notified_states.discard(TurnState.WAITING_INPUT)
+            runtime.notified_states.discard(TurnState.WAITING_APPROVAL)
             if signal.kind == SignalKind.ASSISTANT_MESSAGE:
                 message = signal.data.get("message")
                 if isinstance(message, str) and message:
@@ -276,6 +330,7 @@ class StateMachine:
                 message=reason,
             )
             self._compact_runtime(runtime)
+            self._remember_retired((runtime.session_id, runtime.turn_id))
             return [note] if note else []
 
         if signal.kind == SignalKind.TURN_COMPLETED:
@@ -320,6 +375,7 @@ class StateMachine:
                     message=preview,
                 )
             self._compact_runtime(runtime)
+            self._remember_retired((runtime.session_id, runtime.turn_id))
             return [note] if note else []
 
         if signal.kind == SignalKind.PROCESS_STOPPED:

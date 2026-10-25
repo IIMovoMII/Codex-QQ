@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 import uuid
+import inspect
 
 from control_actions import SUPPORTED_REQUESTS, describe_request, request_reference, signature
 
@@ -30,6 +31,22 @@ class ActionCommands:
         self.r.store.finish_operation(self.scope, key, state, reply)
         return reply, state
 
+    def _backend_call(self, name: str, *args: Any, connection: str | None = None) -> Any:
+        """Keep small test/delivery adapters source-compatible while the
+        production backend receives the connection generation at the IPC
+        boundary."""
+        method = getattr(self.r.backend, name)
+        try:
+            parameters = inspect.signature(method).parameters
+            supports_connection = ('connection' in parameters
+                                   or any(p.kind is inspect.Parameter.VAR_POSITIONAL
+                                          for p in parameters.values()))
+        except (TypeError, ValueError):
+            supports_connection = True
+        if connection is not None and supports_connection:
+            return method(*args, connection)
+        return method(*args)
+
     def command(self, thread_id: str, command: str, arg: str) -> tuple[str, str] | None:
         if command == '引导':
             if not arg:
@@ -40,7 +57,7 @@ class ActionCommands:
             row = self.r.catalog.thread(thread_id)
             body = (self.r.catalog.label(row) if row else '原对话') + '\n' + result['reply']
             body += '\n按你选择的原生规则，引导执行时的活动任务；不锁定先前查询到的轮次。'
-            return self.r._card(self.scope, 'thread', {'thread_id': thread_id}, body), result['state']
+            return self.r._card(self.scope, 'thread', {'thread_id': thread_id, 'connection': self.connection}, body), result['state']
         if command == '分支':
             if arg:
                 return '本轮只支持最近已完成位置。请单独发送“分支”查看范围；不会忽略你指定的更早位置。', 'rejected'
@@ -69,7 +86,7 @@ class ActionCommands:
                 return result['reply'], 'rejected'
             row = self.r.catalog.thread(thread_id)
             prefix = self.r.catalog.label({**row, 'name': result.get('title') or row['name']}) if row else '原对话'
-            return self.r._card(self.scope, 'thread', {'thread_id': thread_id},
+            return self.r._card(self.scope, 'thread', {'thread_id': thread_id, 'connection': self.connection},
                                 prefix + '\n' + result['reply']), result['state']
         if command == '队列':
             self.r.backend.require_extended_contract()
@@ -123,11 +140,12 @@ class ActionCommands:
             lines.append('引用回复序号；下一步会展示改动并要求明确确认。')
             data = {'thread_id': thread_id, 'choices': choices, 'baseline': {
                 'digest': signature(effective), 'owner_id': state['owner_id']}, 'connection': self.connection}
+            data['operation_id'] = uuid.uuid4().hex
             return self.card('permission_options', data, '\n'.join(lines)), 'confirmed'
         if command == '压缩上下文':
             if arg:
                 return '请单独发送“压缩上下文”。', 'rejected'
-            result = self.r.backend.compact(thread_id)
+            result = self._backend_call('compact', thread_id, connection=self.connection)
             if result['state'] == 'rejected':
                 return result['reply'], 'rejected'
             data = {'thread_id': thread_id, 'baseline': result.get('baseline', []),
@@ -161,18 +179,23 @@ class ActionCommands:
         if remaining:
             lines.append('引用回复“下一页”继续。')
         return self.card(kind, {'thread_id': thread_id, 'entries': shown, 'remaining': remaining,
-                              'offset': offset, 'title': title}, '\n'.join(lines))
+                              'offset': offset, 'title': title, 'connection': self.connection}, '\n'.join(lines))
 
     def quoted(self, ref: dict, text: str) -> tuple[str, str] | None:
         kind, data = ref['kind'], ref['data']
         thread_id = data.get('thread_id')
         if kind not in ('queue_list', 'queued', 'submission', 'request_list', 'request', 'permission_options', 'permission_confirm', 'compaction', 'fork_confirm', 'async_notice', 'async_question'):
             return None
+        # A notification footer predates control-card connection tokens.  It
+        # is read-only and routes to a freshly generated current-connection
+        # “待办” card; all mutating/action cards must carry the token.
+        if kind != 'async_notice' and data.get('connection') != self.connection:
+            return '这张操作卡片来自旧连接，已过期。请重新查看目标对话；不会补执行。', 'rejected'
         if not self.r.catalog.thread(thread_id):
             return '目标对话已不在可控制列表；未操作。', 'rejected'
         if kind == 'submission':
             if text == '对话':
-                return self.r._thread_card(self.scope, self.r.catalog.thread(thread_id)), 'confirmed'
+                return self.r._thread_card(self.scope, self.r.catalog.thread(thread_id), connection=self.connection), 'confirmed'
             if text in ('状态', '队列'):
                 from submission_receipts import status_text
                 observed = self.r.backend.submission_status(data, self.r.catalog, self.connection)
@@ -209,12 +232,11 @@ class ActionCommands:
                 return '原问题或审批已过期，请重新查看待办。', 'rejected'
             return self.card('request', entry, describe_request(request)), 'confirmed'
         if kind == 'queued':
-            if data.get('connection') != self.connection:
-                return '这项队列操作来自旧连接，已过期。请重新查看目标对话的队列。', 'rejected'
             entry = data['entry']
             if text == '删除':
                 return self._once('queue-delete:' + thread_id + ':' + entry['id'] + ':' + entry['digest'],
-                                  lambda: self.r.backend.remove_saved_queue_item(thread_id, entry, self.r.catalog))
+                                  lambda: self._backend_call('remove_saved_queue_item', thread_id, entry, self.r.catalog,
+                                                              connection=self.connection))
             command, _, arg = text.partition(' ')
             if command in ('引导', '/引导', '/steer'):
                 if not arg.strip():
@@ -230,7 +252,7 @@ class ActionCommands:
                     body = (self.r.catalog.label(row) if row else '原对话') + '\n' + result['reply']
                     body += '\n这次引导作用于当前正在运行的任务；原排队消息仍保留，没有修改或删除。'
                     return {'state': result['state'],
-                            'reply': self.r._card(self.scope, 'thread', {'thread_id': thread_id}, body)}
+                            'reply': self.r._card(self.scope, 'thread', {'thread_id': thread_id, 'connection': self.connection}, body)}
 
                 return self._once(key, steer_queued)
             return '这条卡片可以回复“引导 内容”或“删除”。引导只作用于当前活动任务；正文请引用对话卡片发送。', 'rejected'
@@ -265,7 +287,14 @@ class ActionCommands:
             key = 'request:' + self.connection + ':' + data['owner_id'] + ':' + str(data['request_id']) + ':' + data['digest']
             return self._once(key, lambda: self.r.backend.respond_to_request(data, text))
         if kind == 'permission_options':
+            option_key = 'permission-options:' + str(data.get('operation_id', ''))
+            if data.get('operation_id'):
+                previous = self.r.store.operation(self.scope, option_key)
+                if previous is not None and previous['state'] == 'cancelled':
+                    return '这张权限选项卡已取消，未修改权限。请重新引用对话卡片查看最新权限。', 'rejected'
             if text == '取消':
+                if data.get('operation_id'):
+                    return self._once(option_key, lambda: {'state': 'cancelled', 'reply': '已取消权限修改，原选项卡不再执行。'})
                 return '没有修改权限。', 'confirmed'
             index = int(text) - 1 if text.isdigit() else -1
             if not 0 <= index < len(data['choices']):
@@ -278,12 +307,20 @@ class ActionCommands:
             return self.card('permission_confirm', {**data, 'choice': choice, 'operation_id': uuid.uuid4().hex}, body), 'confirmed'
         if kind == 'permission_confirm':
             choice = data['choice']
+            cancel_key = 'permission-confirm-cancel:' + str(data.get('operation_id', ''))
+            if data.get('operation_id'):
+                previous = self.r.store.operation(self.scope, cancel_key)
+                if previous is not None and previous['state'] == 'cancelled':
+                    return '这张权限确认卡已取消，未修改权限。请重新查看权限选项。', 'rejected'
             if text == '取消':
+                if data.get('operation_id'):
+                    return self._once(cancel_key, lambda: {'state': 'cancelled', 'reply': '已取消权限修改，原确认卡不再执行。'})
                 return '没有修改权限。', 'confirmed'
             if text != '确认 ' + choice['name']:
                 return '未修改，请按卡片上的完整确认文字回复。', 'rejected'
             return self._once('permission:' + data['operation_id'],
-                              lambda: self.r.backend.update_permissions(thread_id, choice['changes'], data['baseline']))
+                              lambda: self._backend_call('update_permissions', thread_id, choice['changes'], data['baseline'],
+                                                         connection=self.connection))
         if kind == 'compaction':
             if text != '压缩状态':
                 return '本条用于查询压缩结果，请引用回复“压缩状态”；不会自动重复压缩。', 'rejected'
@@ -335,7 +372,7 @@ class ActionCommands:
         settings = result.get('settings') or {}
         body += f"\n原生继承设置：{settings.get('model') or '待查看'} / {settings.get('effort') or '待查看'}"
         body += '\n引用本条发送首条新任务，操作的是分支对话。'
-        return {**result, 'reply': self.r._card(self.scope, 'thread', {'thread_id': ident}, body)}
+        return {**result, 'reply': self.r._card(self.scope, 'thread', {'thread_id': ident, 'connection': self.connection}, body)}
 
     @staticmethod
     def _project_identity(row: dict | None) -> dict:

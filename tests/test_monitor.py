@@ -56,6 +56,43 @@ def session_meta(session_id: str, *, source: str = "vscode") -> str:
 
 
 class MonitorRaceTests(unittest.TestCase):
+    def test_transcript_cursor_is_replayed_when_apply_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / ".codex"
+            transcript = codex_home / "sessions" / "rollout-2026-08-23T00-00-00-55555555-5555-5555-5555-555555555555.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_text(
+                session_meta("55555555-5555-5555-5555-555555555555")
+                + record({"type": "task_started", "turn_id": "t"}),
+                encoding="utf-8",
+            )
+            monitor = DesktopMonitor(MonitorConfig(codex_home=codex_home, data_dir=root / "runtime"))
+            monitor.tailer.register_from_start(transcript)
+            original = monitor._apply
+            with patch.object(monitor, '_apply', side_effect=RuntimeError('state write failed')):
+                with self.assertRaises(RuntimeError):
+                    monitor._read_transcript(transcript)
+            self.assertEqual(monitor.tailer.cursor_for(transcript).offset, 0)
+            original([])
+            monitor._read_transcript(transcript)
+            self.assertIn(("55555555-5555-5555-5555-555555555555", "t"), monitor.machine.turns)
+
+    def test_starting_monitor_retires_active_turn_after_desktop_was_already_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            monitor = DesktopMonitor(MonitorConfig(
+                codex_home=root / '.codex', data_dir=root / 'runtime', process_exit_grace_seconds=10.0,
+            ))
+            monitor.machine.apply(Signal(SignalKind.TURN_STARTED, session_id='s', turn_id='t', source='test'))
+            missing = ProcessStatus(desktop_alive=False, app_server_alive=False)
+            with patch('monitor.get_codex_desktop_process_status', return_value=missing), patch(
+                    'monitor.time.monotonic', side_effect=[100.0, 111.0, 111.0]):
+                monitor._check_processes()
+                self.assertFalse(monitor.machine.turns[('s', 't')].terminal)
+                monitor._check_processes()
+            self.assertTrue(monitor.machine.turns[('s', 't')].terminal)
+            self.assertEqual(monitor.machine.active_runtimes(), [])
     def test_unknown_old_rollout_is_not_replayed_but_new_append_is_seen(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

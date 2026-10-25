@@ -45,6 +45,7 @@ def setup_state(root: Path, runtime: Path) -> str:
         state = json.loads(settings.read_text(encoding='utf-8-sig'))
         if (not isinstance(state, dict) or state.get('mode') != 'cc-connect'
                 or Path(state.get('executable', '')).resolve() != (root / GATEWAY_RELATIVE).resolve()
+                or Path(state.get('config_path', '')).resolve() != (runtime / 'cc-connect.toml').resolve()
                 or not Path(state.get('config_path', '')).is_file()):
             raise ValueError('已有安装的路径或模式与当前目录不同，请按更新说明接续原安装，不要重复绑定。')
         return 'configured'

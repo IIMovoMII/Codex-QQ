@@ -81,6 +81,23 @@ class IncrementalTailer:
     def _save(self) -> None:
         atomic_write_json(self.state_path, {path: asdict(cursor) for path, cursor in self.cursors.items()})
 
+    def commit(self) -> None:
+        """Persist the in-memory cursor after its signals were applied.
+
+        The monitor uses this as a small transaction boundary: a cursor must
+        not advance on disk before the state machine and notification queue
+        have accepted the corresponding records.
+        """
+        self._save()
+
+    def restore_cursor(self, path: str | Path, cursor: Cursor | None) -> None:
+        key = self.key_for(path)
+        if cursor is None:
+            self.cursors.pop(key, None)
+        else:
+            self.cursors[key] = Cursor(**asdict(cursor))
+        self._save()
+
     def key_for(self, path: str | Path) -> str:
         return canonical_path_key(path)
 
@@ -141,7 +158,8 @@ class IncrementalTailer:
     def known_paths(self) -> list[Path]:
         return [Path(path) for path in self.cursors]
 
-    def read_new_signals(self, path: Path, *, max_bytes: int = 32 * 1024 * 1024) -> list[Signal]:
+    def read_new_signals(self, path: Path, *, max_bytes: int = 32 * 1024 * 1024,
+                         persist: bool = True) -> list[Signal]:
         resolved = path.resolve()
         key = self.key_for(resolved)
         stat = resolved.stat()
@@ -156,7 +174,8 @@ class IncrementalTailer:
             cursor.identity = identity
             cursor.session_id = session_id_from_path(resolved)
             cursor.turn_id = None
-            self._save()
+            if persist:
+                self._save()
             return []
 
         signals: list[Signal] = []
@@ -201,5 +220,6 @@ class IncrementalTailer:
                 signals.append(signal)
         cursor.offset += consumed
         cursor.identity = identity
-        self._save()
+        if persist:
+            self._save()
         return signals

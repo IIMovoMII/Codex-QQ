@@ -153,6 +153,21 @@ class ActionRouterTests(unittest.TestCase):
         self.assertEqual(len(self.backend.permission_updates), 1)
         self.assertNotIn('permissions', self.backend.permission_updates[0][1])
 
+    def test_cancelled_permission_options_card_cannot_be_reused(self):
+        card = self.send('/use ' + THREAD_A)
+        options = self.send('权限', quote=card)
+        self.assertIn('已取消', self.send('取消', quote=options))
+        self.assertIn('选项卡已取消', self.send('2', quote=options))
+        self.assertEqual(self.backend.permission_updates, [])
+
+    def test_cancelled_permission_confirmation_card_cannot_be_reused(self):
+        card = self.send('/use ' + THREAD_A)
+        options = self.send('权限', quote=card)
+        confirm = self.send('2', quote=options)
+        self.assertIn('已取消', self.send('取消', quote=confirm))
+        self.assertIn('确认卡已取消', self.send('确认 完全访问', quote=confirm))
+        self.assertEqual(self.backend.permission_updates, [])
+
     def test_custom_permissions_cannot_be_reset_from_qq(self):
         card = self.send('/use ' + THREAD_A)
         self.backend.permissions['activePermissionProfile'] = {'id': 'custom-profile'}

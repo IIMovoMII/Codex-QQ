@@ -119,6 +119,19 @@ class GatewayReleaseTests(unittest.TestCase):
             self.assertEqual(staged.read_bytes(), b'other-installer')
             self.assertFalse(target.exists())
 
+    def test_valid_staging_file_is_resumed_without_network(self):
+        with tempfile.TemporaryDirectory() as temp:
+            target = Path(temp) / 'gateway.exe'
+            staged = target.with_suffix('.staged.exe')
+            staged.write_bytes(b'verified-fixture')
+            with patch.object(fetch_gateway, 'BINARY_SHA256', fetch_gateway._sha256(staged)), \
+                    patch.object(fetch_gateway, '_download') as download:
+                result = fetch_gateway.fetch(target=target)
+            self.assertFalse(result['cached'])
+            self.assertEqual(target.read_bytes(), b'verified-fixture')
+            self.assertFalse(staged.exists())
+            download.assert_not_called()
+
     def test_download_rejects_bad_binary_provenance(self):
         with tempfile.TemporaryDirectory() as temp:
             target = Path(temp) / 'gateway.exe'

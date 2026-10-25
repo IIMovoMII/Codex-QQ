@@ -89,6 +89,17 @@ class BackendTests(unittest.TestCase):
         check.assert_called_once_with('actual-owner.exe', UPDATE, 2)
         self.assertFalse(any(x.get('method') == UPDATE for x in pipe.writes))
 
+    def test_connection_is_rechecked_immediately_before_mutation(self):
+        b, pipe = self.backend()
+        pipe.handle = object()
+        with patch('control_backend.pipe_server_identity', side_effect=[
+                ('same-desktop', 1.0, 'Codex.exe'),
+                ('new-desktop', 2.0, 'Codex.exe')]):
+            result = b.call(THREAD, UPDATE, {'threadSettings': {'effort': 'high'}}, 2,
+                            expected_connection='same-desktop')
+        self.assertEqual(result['state'], 'rejected')
+        self.assertFalse(any(x.get('method') == UPDATE for x in pipe.writes))
+
     def test_canonical_history_extracts_latest_real_turn_without_retaining_content(self):
         state = {'turnHistory': {'kind': 'canonical', 'history': {
             'entitiesByKey': {'old': {'turnId': 'old', 'status': 'completed', 'items': [{'text': 'secret'}]}, 'new': {'turnId': 'new', 'status': 'inProgress', 'items': [{'text': 'secret'}]}},

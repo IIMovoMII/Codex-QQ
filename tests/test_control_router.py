@@ -193,6 +193,31 @@ class ControlRouterTests(unittest.TestCase):
         self.assertIn("作废", self.controller.handle(params))
         self.assertIn("已提交", self.send("继续", quote=card))
 
+    def test_bridge_restart_rejects_event_buffered_before_new_bridge_generation(self):
+        card = self.send('/use ' + THREAD_A)
+        buffered_at = time.time()
+        restarted = ControlRouter(self.store, FakeCatalog(), self.backend,
+                                   lambda t, text: (self.calls.append((t, text)) or True, ""))
+        params = self.request('继续', quote=card, message_id='before-bridge-restart',
+                              timestamp=buffered_at)
+        self.assertIn('作废', restarted.handle(params))
+        self.assertEqual(self.calls, [])
+
+    def test_bridge_restart_for_one_qq_session_does_not_invalidate_another(self):
+        with patch.dict(os.environ, {'CC_SESSION_KEY': 'qqbot:other'}, clear=False):
+            other = ControlRouter(self.store, FakeCatalog(), self.backend,
+                                  lambda t, text: (self.calls.append((t, text)) or True, ""))
+            other_card_params = self.request('/use ' + THREAD_A, message_id='other-select')
+            other_card_params['_meta']['cc_connect'].update({'session_key': 'qqbot:other', 'user_id': 'other'})
+            other_card = other.handle(other_card_params)
+            event_time = time.time()
+            other_params = self.request('继续', quote=other_card, message_id='other-session-event',
+                                        timestamp=event_time + 0.01)
+            other_params['_meta']['cc_connect'].update({'session_key': 'qqbot:other', 'user_id': 'other'})
+            other_reply = other.handle(other_params)
+            self.assertIn('已提交', other_reply)
+        self.assertEqual(self.calls, [(THREAD_A, '继续')])
+
     def test_missing_metadata_fake_body_identity_and_wrong_user_quote_rejected(self):
         self.assertIn("缺少", self.controller.handle({"prompt": [{"text": "/continue"}]}))
         card = self.send("/use " + THREAD_A)
@@ -300,6 +325,17 @@ class ControlRouterTests(unittest.TestCase):
         options = self.send("思考档位", quote=card)
         with patch.object(self.controller.catalog, "models", side_effect=ValueError("stale")):
             self.assertIn("未修改", self.send("1", quote=options))
+        self.assertEqual(self.backend.updates, [])
+
+    def test_legacy_setting_options_without_connection_are_rejected(self):
+        card = self.send('/use ' + THREAD_A)
+        token = self.store.reference('test|qqbot:user|user', 'setting_options', {
+            'thread_id': THREAD_A, 'field': 'effort', 'options': [{'effort': 'high'}],
+            'remaining': [], 'offset': 0, 'source': 'legacy',
+            'baseline': {'model': 'gpt-test', 'effort': 'max'},
+        })
+        quote = f'引用标识：{token}'
+        self.assertIn('旧连接', self.send('1', quote=quote))
         self.assertEqual(self.backend.updates, [])
 
     def test_long_setting_options_use_fixed_pages_without_cutting_controls(self):

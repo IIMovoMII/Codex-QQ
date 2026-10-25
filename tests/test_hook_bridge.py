@@ -89,6 +89,14 @@ class HookBridgeTests(unittest.TestCase):
             ), patch("hook_bridge.subprocess.Popen") as popen:
                 self.assertFalse(request_runtime_autostart("UserPromptSubmit", data_dir=Path(temporary)))
             popen.assert_not_called()
+        with tempfile.TemporaryDirectory() as temporary:
+            # Shadow delivery has no CC Connect process to start. A healthy
+            # monitor must not launch an ensure-runtime helper per hook event.
+            with patch("launcher.read_monitor_pid", return_value=123), patch(
+                "launcher.read_cc_connect_pid", return_value=None
+            ), patch("hook_bridge.subprocess.Popen") as popen:
+                self.assertFalse(request_runtime_autostart("UserPromptSubmit", data_dir=Path(temporary)))
+            popen.assert_not_called()
         self.assertFalse(
             should_autostart_runtime(
                 "SessionEnd",

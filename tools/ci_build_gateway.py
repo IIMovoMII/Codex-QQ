@@ -38,7 +38,7 @@ def main() -> None:
             'https://github.com/chenhg5/cc-connect.git', str(source))
         if run('git', 'rev-parse', 'HEAD', cwd=source) != REVISION:
             raise ValueError('上游标签内容与已核实版本不同，停止构建。')
-        for name in ('metadata.patch', 'delivery.patch', 'minimal-build.patch'):
+        for name in ('metadata.patch', 'delivery.patch', 'minimal-build.patch', 'security.patch'):
             patch = str(vendor / name)
             run('git', 'apply', '--check', patch, cwd=source)
             run('git', 'apply', patch, cwd=source)

@@ -57,6 +57,17 @@ class InstallWizardTests(unittest.TestCase):
                 install_app.setup_state(Path(temp) / 'two', runtime)
             self.assertEqual(original, (runtime / 'settings.json').read_bytes())
 
+    def test_formal_install_rejects_config_path_outside_runtime(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root, runtime = Path(temp), Path(temp) / 'runtime'
+            self.make_formal(root, runtime)
+            settings = runtime / 'settings.json'
+            value = json.loads(settings.read_text(encoding='utf-8'))
+            value['config_path'] = str(Path(temp) / 'foreign.toml')
+            settings.write_text(json.dumps(value), encoding='utf-8')
+            with self.assertRaises(ValueError):
+                install_app.setup_state(root, runtime)
+
     def test_pending_tamper_is_rejected_before_gateway_launch(self):
         with tempfile.TemporaryDirectory() as temp:
             root, runtime = Path(temp), Path(temp) / 'runtime'

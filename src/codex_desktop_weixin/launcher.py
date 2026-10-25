@@ -23,7 +23,9 @@ CODEX_APP_TARGET = r"shell:AppsFolder\OpenAI.Codex_2p2nqsd0c76g0!App"
 PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 PROCESS_TERMINATE = 0x0001
 PROCESS_IDENTITY_VERSION = 1
-PROCESS_START_TIME_TOLERANCE_SECONDS = 5.0
+# Windows FILETIME is precise enough that a multi-second tolerance can confuse
+# a newly reused PID with the old managed process.
+PROCESS_START_TIME_TOLERANCE_SECONDS = 0.25
 WINDOWS_EPOCH_OFFSET_SECONDS = 11644473600
 
 
@@ -276,6 +278,21 @@ def _force_terminate_process(pid: int) -> None:
         close_handle(handle)
 
 
+def _terminate_spawned_process(process: Any) -> None:
+    """Stop only a child for which this process still owns a Popen handle."""
+    if process is None or process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=2.0)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def read_cc_connect_pid(data_dir: Path) -> int | None:
     try:
         value = _read_service_state(data_dir)
@@ -523,18 +540,25 @@ def start_cc_connect_service(data_dir: Path) -> dict[str, Any]:
             startupinfo=startupinfo,
             close_fds=True,
         )
-    atomic_write_json(
-        _service_state_path(data_dir),
-        {
-            "pid": process.pid,
-            "started_at": time.time(),
-            "executable": str(executable),
-            "config_path": settings.config_path,
-            "log_offset": log_offset,
-            "socket_path": str(cc_connect_api_socket_path(data_dir)),
-            **_capture_process_identity(process.pid),
-        },
-    )
+    try:
+        atomic_write_json(
+            _service_state_path(data_dir),
+            {
+                "pid": process.pid,
+                "started_at": time.time(),
+                "executable": str(executable),
+                "config_path": settings.config_path,
+                "log_offset": log_offset,
+                "socket_path": str(cc_connect_api_socket_path(data_dir)),
+                **_capture_process_identity(process.pid),
+            },
+        )
+    except BaseException:
+        # A state-file failure must not leave a gateway that the resident app
+        # can no longer identify or stop.
+        _terminate_spawned_process(process)
+        cleanup_stale_cc_connect_socket(data_dir)
+        raise
     api_status = _wait_for_cc_connect_api(process, log_path, start_offset=log_offset)
     if api_status == "process_exited":
         try:
@@ -569,8 +593,16 @@ def start_cc_connect_service(data_dir: Path) -> dict[str, Any]:
 
 
 def stop_cc_connect_service(data_dir: Path, *, timeout_seconds: float = 8.0) -> dict[str, Any]:
+    state = _read_service_state(data_dir)
     pid = read_cc_connect_pid(data_dir)
     if not pid:
+        try:
+            state_pid = int(state.get('pid', 0))
+        except (TypeError, ValueError):
+            state_pid = 0
+        if state_pid > 0 and _pid_alive(state_pid) and not _process_identity_matches(state, state_pid):
+            return {"cc_connect_stopped": False, "cc_connect_pid": state_pid,
+                    "reason": "managed-process-identity-changed"}
         try:
             _service_state_path(data_dir).unlink()
         except OSError:
@@ -601,7 +633,13 @@ def stop_cc_connect_service(data_dir: Path, *, timeout_seconds: float = 8.0) -> 
                 "reason": "graceful",
                 **cleanup_stale_cc_connect_socket(data_dir),
             }
+        if not _process_identity_matches(state, pid):
+            return {"cc_connect_stopped": False, "cc_connect_pid": pid,
+                    "reason": "managed-process-identity-changed"}
         time.sleep(0.1)
+    if not _process_identity_matches(state, pid):
+        return {"cc_connect_stopped": False, "cc_connect_pid": pid,
+                "reason": "managed-process-identity-changed"}
     try:
         _force_terminate_process(pid)
     except OSError as error:
@@ -619,6 +657,9 @@ def stop_cc_connect_service(data_dir: Path, *, timeout_seconds: float = 8.0) -> 
         return {"cc_connect_stopped": False, "cc_connect_pid": pid, "reason": f"graceful_timeout; force_failed: {error}"}
     forced_deadline = time.monotonic() + 2.0
     while time.monotonic() < forced_deadline:
+        if not _process_identity_matches(state, pid):
+            return {"cc_connect_stopped": False, "cc_connect_pid": pid,
+                    "reason": "managed-process-identity-changed"}
         if not _pid_alive(pid):
             try:
                 _service_state_path(data_dir).unlink()

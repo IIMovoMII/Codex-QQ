@@ -106,4 +106,4 @@ class CreationCommands:
         else:
             body += '\n设置尚未回读；引用本条回复“设置”核对实际模型、档位和权限。'
         body += '\n每次引用本条发送消息，操作的是新对话，不是原来的调用来源。'
-        return {**result, 'reply': self.r._card(self.scope, 'thread', {'thread_id': ident}, body)}
+        return {**result, 'reply': self.r._card(self.scope, 'thread', {'thread_id': ident, 'connection': self.connection}, body)}

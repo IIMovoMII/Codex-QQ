@@ -212,7 +212,8 @@ class DesktopClient:
         return result
 
 
-def pause_desktop(thread_id: str, *, pipe_factory: Any = WindowsDesktopPipe) -> tuple[bool, str]:
+def pause_desktop(thread_id: str, *, expected_connection: str | None = None,
+                 pipe_factory: Any = WindowsDesktopPipe) -> tuple[bool, str]:
     # 不依赖 qq_desktop_bridge，避免入口互相导入；和路由使用同样的编号范围。
     import re
 
@@ -223,7 +224,12 @@ def pause_desktop(thread_id: str, *, pipe_factory: Any = WindowsDesktopPipe) -> 
         with pipe_factory() as pipe:
             client = DesktopClient(pipe)
             client.initialize()
+            if expected_connection is not None and hasattr(pipe, "handle") and pipe_server_identity(pipe)[0] != expected_connection:
+                raise DesktopControlError("desktop-changed-before-dispatch")
             owner_id = client.owner(thread_id)
+            if expected_connection is not None and hasattr(pipe, "handle"):
+                if pipe_server_identity(pipe)[0] != expected_connection:
+                    raise DesktopControlError("desktop-changed-before-dispatch")
             sent = True
             result = client.stop(thread_id, owner_id)
             if result.get("ok") is not True or "interruptedTurnId" not in result:

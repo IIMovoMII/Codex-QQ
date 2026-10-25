@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import math
 import os
 import re
@@ -34,6 +35,8 @@ class ControlRouter:
         self.store, self.catalog, self.backend = store, catalog, backend
         self.queue_func = queue_func
         self.availability_check = availability_check
+        self._process_started_at = time.time()
+        self._bridge_scopes: set[str] = set()
         self.store.prune()
 
     @classmethod
@@ -78,6 +81,12 @@ class ControlRouter:
         if not isinstance(message_id, str) or not 1 <= len(message_id) <= 240:
             return "入站消息缺少原始编号，未执行。"
         scope = f"{os.environ.get('CC_PROJECT','default')}|{expected}|{meta['user_id']}"
+        # A bridge restart is a new control generation for this QQ session,
+        # even when Desktop and its process identity remain unchanged. Keep
+        # the cutoff scoped so another user's ACP process is not invalidated.
+        if scope not in self._bridge_scopes:
+            self.store.begin_bridge_session(scope, now=self._process_started_at)
+            self._bridge_scopes.add(scope)
         try:
             sent_at = float(meta["sent_at_ms"]) / 1000
             gateway_ready = float(meta["connection_ready_at_ms"]) / 1000
@@ -97,7 +106,7 @@ class ControlRouter:
         try:
             identity, started_at = self.backend.probe()
             probed = True
-            since = self.store.ready(identity, True, now=started_at)
+            since = self.store.ready(identity, True, now=started_at, scope=scope)
             if sent_at < max(since, gateway_ready):
                 outcome, reply = "rejected", "这条消息来自离线或重连前，已作废。恢复后请重新发送；旧对话卡片仍可引用。"
             else:
@@ -105,7 +114,7 @@ class ControlRouter:
                 dispatching = True
                 reply, outcome = self._dispatch(scope, meta)
         except (OSError, TimeoutError):
-            self.store.offline()
+            self.store.offline(scope)
             outcome, reply = ('unknown', UNKNOWN) if dispatching else ('rejected', OFFLINE)
         except Exception as error:
             # A dispatched mutation can have succeeded. Never transform an exception
@@ -114,7 +123,7 @@ class ControlRouter:
                 # An unloaded conversation or an unsupported method is not a
                 # global disconnect. Other owner windows remain usable.
                 if not probed or str(error) == "connection-closed":
-                    self.store.offline()
+                    self.store.offline(scope)
                 if 'contract' in str(error) or 'installation-mismatch' in str(error):
                     outcome, reply = 'rejected', '这项操作的原生接口格式已变化，未执行；其他兼容功能和通知继续可用。请更新 QQ 助手的接口适配；不需要固定 Codex 安装版本。'
                 elif str(error).startswith('desktop-capability-source-'):
@@ -143,8 +152,24 @@ class ControlRouter:
         footer += f"\n引用标识：{token}"
         return body[:2000 - len(footer)] + footer
 
-    def _thread_card(self, scope: str, row: dict, status: str = '') -> str:
-        return self._card(scope, "thread", {"thread_id": row["id"]},
+    def _backend_call(self, name: str, *args: Any, connection: str | None = None) -> Any:
+        method = getattr(self.backend, name)
+        try:
+            parameters = inspect.signature(method).parameters
+            supports_connection = ('connection' in parameters
+                                   or any(p.kind is inspect.Parameter.VAR_POSITIONAL
+                                          for p in parameters.values()))
+        except (TypeError, ValueError):
+            supports_connection = True
+        if connection is not None and supports_connection:
+            return method(*args, connection)
+        return method(*args)
+
+    def _thread_card(self, scope: str, row: dict, status: str = '', connection: str | None = None) -> str:
+        data = {"thread_id": row["id"]}
+        if connection:
+            data["connection"] = connection
+        return self._card(scope, "thread", data,
                           f"💬 已选定 {self.catalog.label(row)}\n\n引用本条，说说接下来要做什么。\n这条回执以后也能用；每次操作都请引用目标。" +
                           (f"\n窗口状态：{status}" if status else ''))
 
@@ -153,24 +178,25 @@ class ControlRouter:
         thread_id = row['id']
         try:
             self.backend.ensure_owner(thread_id)
-            return self._thread_card(scope, row, '已连接。'), 'confirmed'
+            return self._thread_card(scope, row, '已连接。', connection), 'confirmed'
         except (OSError, TimeoutError, DesktopControlError):
             pass
         result = self.backend.open_thread(thread_id, connection, str(uuid.uuid4()))
         if result['state'] != 'confirmed':
-            return self._thread_card(scope, row, result['reply']), result['state']
+            return self._thread_card(scope, row, result['reply'], connection), result['state']
         deadline = time.monotonic() + 3.0
         while True:
             try:
                 self.backend.ensure_owner(thread_id)
-                return self._thread_card(scope, row, '已打开并连接。'), 'confirmed'
+                return self._thread_card(scope, row, '已打开并连接。', connection), 'confirmed'
             except (OSError, TimeoutError, DesktopControlError):
                 if time.monotonic() >= deadline:
                     return (self._thread_card(scope, row,
-                            '已请求打开，但尚未确认连接。请稍后引用本卡片再发；当前没有发送任务。'), 'unknown')
+                            '已请求打开，但尚未确认连接。请稍后引用本卡片再发；当前没有发送任务。', connection), 'unknown')
                 time.sleep(0.1)
 
-    def _list_card(self, scope: str, kind: str, rows: list[dict], title: str, offset: int = 0) -> str:
+    def _list_card(self, scope: str, kind: str, rows: list[dict], title: str,
+                   offset: int = 0, connection: str | None = None) -> str:
         lines, part = [title], []
         for row in rows:
             label = str(row["name"]).replace("\n", " ")[:80] if kind == "projects" else self.catalog.label(row) + " · " + row.get("status", "状态未知")
@@ -183,7 +209,10 @@ class ControlRouter:
         lines.extend(["", "引用本条回复序号选择。"])
         if remaining:
             lines.append("引用回复“下一页”继续查看。")
-        return self._card(scope, kind, {"entries": part, "remaining": remaining, "offset": offset, "title": title}, "\n".join(lines), ttl=1800)
+        data = {"entries": part, "remaining": remaining, "offset": offset, "title": title}
+        if connection:
+            data["connection"] = connection
+        return self._card(scope, kind, data, "\n".join(lines), ttl=1800)
 
     def _resolve_quote(self, scope: str, quote: str) -> dict | None:
         tokens = REFERENCE.findall(quote)
@@ -224,6 +253,20 @@ class ControlRouter:
         # unquoted command using a remembered selection from an earlier message.
         thread_id = ref["data"].get("thread_id") if ref and isinstance(ref["data"], dict) else None
         kind = ref["kind"] if ref else None
+        if ref and kind == "setting_options":
+            # Model/effort options are mutating cards. Unlike old thread
+            # selection notices, they must always carry the current connection
+            # generation; otherwise a pre-restart card could change the new
+            # window's settings.
+            if ref["data"].get("connection") != meta.get("_desktop_identity"):
+                return "这张设置卡片来自旧连接，已过期。请重新查看目标对话；不会修改任何设置。", "rejected"
+        elif ref and kind in {"thread", "project", "threads", "projects"}:
+            # Legacy plain notifications never carried a connection token; keep
+            # their read/selection compatibility. Every newly generated card
+            # carries one and is rejected after a Desktop restart.
+            if (ref["data"].get("connection") is not None
+                    and ref["data"].get("connection") != meta.get("_desktop_identity")):
+                return "这张卡片来自旧连接，已过期。请重新发送“对话”并选择目标；不会修改任何设置。", "rejected"
         from control_commands import ActionCommands
         from creation_commands import CreationCommands
         actions = ActionCommands(self, scope, meta.get('_desktop_identity', ''))
@@ -241,7 +284,8 @@ class ControlRouter:
                 remaining = ref["data"].get("remaining") or []
                 if not remaining:
                     return "这份列表已经没有下一页。", "confirmed"
-                return self._list_card(scope, kind, remaining, ref["data"]["title"], offset + len(ref["data"]["entries"])), "confirmed"
+                return self._list_card(scope, kind, remaining, ref["data"]["title"],
+                                       offset + len(ref["data"]["entries"]), meta['_desktop_identity']), "confirmed"
             if not text.isdigit():
                 return "请引用这份列表回复序号。需要发送任务时，请引用选定对话的卡片。", "rejected"
             index = int(text) - 1 - offset
@@ -250,7 +294,7 @@ class ControlRouter:
                 return "序号不在这份列表里，请重新选择。", "rejected"
             row = entries[index]
             if kind == "projects":
-                return self._card(scope, "project", {"project_id": row["id"]},
+                return self._card(scope, "project", {"project_id": row["id"], "connection": meta['_desktop_identity']},
                                   f"📁 已选定项目：{row['name']}\n\n引用本条发送“对话”或“搜索 关键词”查看项目对话。"), "confirmed"
             verified = self.catalog.thread(row["id"])
             if not verified:
@@ -264,7 +308,8 @@ class ControlRouter:
                 row = self.catalog.thread(thread_id)
                 if not row:
                     return "目标对话已不在可控制列表，请重新选择。", "rejected"
-                return self._setting_options_card(scope, row, data["field"], data["baseline"], data["remaining"], data["source"], data.get("offset", 0) + len(data["options"])), "confirmed"
+                return self._setting_options_card(scope, row, data["field"], data["baseline"], data["remaining"], data["source"],
+                                                  data.get("offset", 0) + len(data["options"]), meta['_desktop_identity']), "confirmed"
             if text == "取消":
                 return "已取消，没有修改设置。", "confirmed"
             parts = text.split()
@@ -281,7 +326,7 @@ class ControlRouter:
                 if len(parts) != 1:
                     return "选择思考档位只需回复序号。", "rejected"
                 changes = {"effort": option["effort"]}
-            return self._change_model_settings(scope, thread_id, changes, ref["data"]["baseline"])
+            return self._change_model_settings(scope, thread_id, changes, ref["data"]["baseline"], meta['_desktop_identity'])
         if kind not in (None, "thread", "project", "settings"):
             return "这条操作卡片当前不能按普通正文回复，请重新查看对应功能。", "rejected"
         command, _, arg = text.partition(" ")
@@ -293,7 +338,7 @@ class ControlRouter:
             rows = self.catalog.projects()
             if not rows:
                 return "没有可控制的本地项目。可发送“对话”查看无项目对话。", "confirmed"
-            return self._list_card(scope, "projects", rows, "项目"), "confirmed"
+            return self._list_card(scope, "projects", rows, "项目", connection=meta['_desktop_identity']), "confirmed"
         if command in ("对话", "搜索"):
             if command == "对话" and arg and (not arg.isdigit() or not 1 <= int(arg) <= 50):
                 return "数量请选择 1～50，例如“对话 20”。", "rejected"
@@ -307,7 +352,8 @@ class ControlRouter:
             budget = time.monotonic() + 5.0
             for r in rows:
                 r["status"] = self.backend.status(r["id"]) if time.monotonic() < budget else "状态未即时核实"
-            return self._list_card(scope, "threads", rows, "搜索结果" if command == "搜索" else "最近对话"), "confirmed"
+            return self._list_card(scope, "threads", rows, "搜索结果" if command == "搜索" else "最近对话",
+                                   connection=meta['_desktop_identity']), "confirmed"
         if command in ("/use", "/选择"):
             row = self.catalog.thread(arg)
             if row is None:
@@ -329,7 +375,7 @@ class ControlRouter:
         if not row:
             return "目标对话不存在或不属于可控制的本地对话，请重新选择。", "rejected"
         if kind == "thread" and not text:
-            return "已识别引用的 Codex 对话。\n" + self._thread_card(scope, row), "confirmed"
+            return "已识别引用的 Codex 对话。\n" + self._thread_card(scope, row, connection=meta['_desktop_identity']), "confirmed"
         extended = actions.command(thread_id, command, arg)
         if extended is not None:
             return extended
@@ -347,7 +393,7 @@ class ControlRouter:
                     changes = {"effort": parts[0]}
                 else:
                     return "可用“模型 模型名 [档位]”或“思考档位 档位”；不加参数可查看选项。", "rejected"
-                return self._change_model_settings(scope, thread_id, changes, before)
+                return self._change_model_settings(scope, thread_id, changes, before, meta['_desktop_identity'])
             field = "model" if command == "模型" else "effort"
             if field == "model":
                 options = catalog["options"]
@@ -356,7 +402,8 @@ class ControlRouter:
                 if not current:
                     return "当前模型不在已确认的目录中，未提供猜测档位。请在电脑刷新列表。", "rejected"
                 options = [{"effort": e} for e in current["efforts"]]
-            return self._setting_options_card(scope, row, field, {k: before.get(k) for k in ("model", "effort")}, options, catalog["source"]), "confirmed"
+            return self._setting_options_card(scope, row, field, {k: before.get(k) for k in ("model", "effort")}, options,
+                                              catalog["source"], connection=meta['_desktop_identity']), "confirmed"
         if command in ("设置", "/current", "/当前"):
             view = self.backend.read_settings(thread_id)
             stored_sandbox = row.get("sandbox_policy") or "{}"
@@ -368,12 +415,12 @@ class ControlRouter:
             sandbox = permissions.get("sandboxPolicy") or {}
             level = {"dangerFullAccess": "完全访问", "danger-full-access": "完全访问", "disabled": "完全访问", "workspaceWrite": "工作区写入", "workspace-write": "工作区写入", "readOnly": "只读", "read-only": "只读"}.get(sandbox.get("type"), "原生默认")
             effort = view.get("effort") or row.get("reasoning_effort") or "原生默认"
-            return self._card(scope, "thread", {"thread_id": thread_id},
+            return self._card(scope, "thread", {"thread_id": thread_id, "connection": meta['_desktop_identity']},
                               f"{self.catalog.label(row)}\n模型：{view.get('model') or '原生默认'}\n思考档位：{effort}\n权限：{level}\n审批策略：{permissions.get('approvalPolicy') or '原生默认'}\n运行状态：{self.backend.status(thread_id)}\n模型来自当前窗口；档位和权限采用窗口返回值或后台已保存设置。\nQQ 回复沿用此对话的原生设置。"), "confirmed"
         if command in ("暂停", "停止", "/pause", "/暂停"):
             if arg:
                 return "暂停指令不需要附加参数。发送普通文字可用“发送 正文”。", "rejected"
-            result = self.backend.pause(thread_id)
+            result = self._backend_call('pause', thread_id, connection=meta['_desktop_identity'])
             return result.get("reply", UNKNOWN), result["state"]
         payload = "继续" if text in ("继续", "/continue", "/继续") else arg if command in ("发送", "/send", "/发送") else text
         if not payload or len(payload) > 4000:
@@ -389,7 +436,7 @@ class ControlRouter:
         if result['state'] != 'confirmed':
             return result['reply'], result['state']
         if result['mode'] == 'started':
-            return self._card(scope, 'thread', {'thread_id': thread_id},
+            return self._card(scope, 'thread', {'thread_id': thread_id, 'connection': meta['_desktop_identity']},
                               f"💬 {self.catalog.label(row)}\n\n已进入对话，这条新消息没有排队。\n沿用本对话的模型、思考档位和权限，完成或出错后再提醒你。\n以前的排队消息仍保留。"), 'confirmed'
         if result['mode'] == 'queued':
             if result.get('native') and result.get('entry'):
@@ -413,11 +460,12 @@ class ControlRouter:
                 body += '\n\n引用本条回复“状态”查看这一条；回复“删除”仅移除仍在排队的本条消息。'
                 body += '\n排队转引导尚未开放。引用回复“对话”取得普通对话回执，可另发“引导 正文”。'
                 return self._card(scope, 'submission', receipt, body, ttl=None), 'confirmed'
-            return self._card(scope, 'thread', {'thread_id': thread_id},
+            return self._card(scope, 'thread', {'thread_id': thread_id, 'connection': meta['_desktop_identity']},
                               f"{self.catalog.label(row)}\n已提交给 Codex，但原生回执没有可核实的消息编号，执行状态未确认；不能据此认定已开始。\n完成或出错后会继续提醒。引用本条发送“队列”可查看当前可见的本地记录；不会重发。"), "confirmed"
         return UNKNOWN, 'unknown'
 
-    def _change_model_settings(self, scope: str, thread_id: str, changes: dict, expected: dict) -> tuple[str, str]:
+    def _change_model_settings(self, scope: str, thread_id: str, changes: dict,
+                               expected: dict, connection: str) -> tuple[str, str]:
         row = self.catalog.thread(thread_id)
         if not row:
             return "目标对话已不在可控制列表，未修改。", "rejected"
@@ -430,14 +478,17 @@ class ControlRouter:
         option = next((o for o in catalog["options"] if o["model"] == model), None)
         if not option or effort not in option["efforts"]:
             return "模型或档位不在当前目录的可选组合中，未修改；不会自动降档。请重新查看模型/档位选项。", "rejected"
-        result = self.backend.update_model_settings(thread_id, changes, expected)
+        result = self._backend_call('update_model_settings', thread_id, changes, expected,
+                                    connection=connection)
         value = result.get("settings")
         reply = self.catalog.label(row) + "\n" + result["reply"]
         if value:
             reply += f"\n模型：{value.get('model')}\n思考档位：{value.get('effort')}"
-        return self._card(scope, "thread", {"thread_id": thread_id}, reply), result["state"]
+        return self._card(scope, "thread", {"thread_id": thread_id, "connection": connection}, reply), result["state"]
 
-    def _setting_options_card(self, scope: str, row: dict, field: str, baseline: dict, options: list[dict], source: str, offset: int = 0) -> str:
+    def _setting_options_card(self, scope: str, row: dict, field: str, baseline: dict,
+                              options: list[dict], source: str, offset: int = 0,
+                              connection: str | None = None) -> str:
         title = "模型" if field == "model" else "思考档位"
         lines = [self.catalog.label(row), f"当前：{baseline['model']} / {baseline['effort']}", f"{title}选项（{source}）"]
         shown = []
@@ -454,4 +505,7 @@ class ControlRouter:
         lines.extend(["", "引用回复序号选择；选模型可附档位，例如“2 high”。", "只影响后续轮次，不自动降档；目录列出不保证服务当前可用。"])
         if remaining:
             lines.append("引用回复“下一页”查看更多。")
-        return self._card(scope, "setting_options", {"thread_id": row["id"], "field": field, "options": shown, "remaining": remaining, "offset": offset, "source": source, "baseline": baseline}, "\n".join(lines), ttl=600)
+        data = {"thread_id": row["id"], "field": field, "options": shown,
+                "remaining": remaining, "offset": offset, "source": source,
+                "baseline": baseline, "connection": connection}
+        return self._card(scope, "setting_options", data, "\n".join(lines), ttl=600)

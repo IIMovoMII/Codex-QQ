@@ -59,19 +59,52 @@ def run_logged(command: list[str], *, stage: str, logs: Path, sensitive=(), cwd=
     with os.fdopen(fd, 'w', encoding='utf-8', newline='\n') as log:
         log.write('阶段：' + stage + '\n')
         log.flush()
+        child = None
+
+        def stop_child() -> None:
+            if child is not None and child.poll() is None:
+                try:
+                    child.terminate()
+                    child.wait(timeout=3.0)
+                except (OSError, subprocess.TimeoutExpired):
+                    try:
+                        child.kill()
+                        child.wait(timeout=3.0)
+                    except (OSError, subprocess.TimeoutExpired):
+                        pass
+
+        def close_child_stdout() -> None:
+            if child is not None and child.stdout is not None:
+                try:
+                    child.stdout.close()
+                except OSError:
+                    pass
+
         try:
-            with subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                  stderr=subprocess.STDOUT) as child:
-                for line in child.stdout:
-                    safe = redact(decode(line), sensitive)
-                    log.write(safe)
-                    log.flush()
-                    tail.append(safe[-2400:])
-                code = child.wait()
+            child = subprocess.Popen(command, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                     stderr=subprocess.STDOUT)
+            for line in child.stdout:
+                safe = redact(decode(line), sensitive)
+                log.write(safe)
+                log.flush()
+                tail.append(safe[-2400:])
+            code = child.wait()
         except OSError as error:
+            stop_child()
+            close_child_stdout()
             message = f'无法启动子进程：{type(error).__name__}，系统错误码 {getattr(error, "winerror", None) or error.errno}'
             log.write(message + '\n')
             raise InstallFailure(stage, summary=message, log_path=Path(name)) from None
+        except BaseException:
+            # Ctrl+C/installer cancellation must not leave a compiler or
+            # packaging child running after the wizard has closed. A forced
+            # parent termination cannot run this block; Windows Job Object
+            # protection remains the installer-level safeguard for that case.
+            stop_child()
+            close_child_stdout()
+            raise
+        finally:
+            close_child_stdout()
         log.write(f'\n退出码：{code}\n')
     if code:
         raise InstallFailure(stage, code=code, summary=''.join(tail), log_path=Path(name))

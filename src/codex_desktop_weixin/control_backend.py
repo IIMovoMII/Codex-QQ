@@ -140,7 +140,8 @@ class NativeBackend:
                 raise DesktopControlError("invalid-settings")
             return {"model": value.get("model"), "effort": value.get("reasoningEffort"), "settings": {}, "permissions": {}, "runtime": {}, "raw": value}
 
-    def update_model_settings(self, thread_id: str, changes: dict[str, str], expected: dict[str, Any]) -> dict[str, Any]:
+    def update_model_settings(self, thread_id: str, changes: dict[str, str], expected: dict[str, Any],
+                              connection: str | None = None) -> dict[str, Any]:
         """Conditional next-turn updates through the existing owner, not config.
 
         Partial fields preserve permissions/plugins/collaboration settings. A lost
@@ -149,6 +150,12 @@ class NativeBackend:
         if not changes or set(changes) - {"model", "effort"} or not all(isinstance(v, str) and v for v in changes.values()):
             return {"state": "rejected", "reply": "设置字段不合法，未修改。"}
         before = self.read_settings(thread_id)
+        if connection is not None:
+            try:
+                if self.probe()[0] != connection:
+                    return {"state": "rejected", "reply": "Codex 连接已变化，未修改设置。请重新查看设置。"}
+            except (DesktopControlError, OSError, TimeoutError):
+                return {"state": "rejected", "reply": "无法核实 Codex 当前连接，未修改设置。"}
         if any(before.get(k) != expected.get(k) for k in ("model", "effort")):
             return {"state": "rejected", "reply": "对话设置已发生变化。这次未修改，请重新查看选项。"}
         if all(before.get(k) == v for k, v in changes.items()):
@@ -156,7 +163,7 @@ class NativeBackend:
         result = self.call(thread_id, "thread-follower-update-thread-settings", {
             "threadSettings": changes,
             "condition": {"ifModelEquals": before.get("model"), "ifEffortEquals": before.get("effort")},
-        }, 2)
+        }, 2, expected_connection=connection)
         if result["state"] != "confirmed":
             return {"state": result["state"], "reply": "设置提交后未取得确认，可能已生效。不会自动重试，请重新查看设置。" if result["state"] == "unknown" else "无法提交设置，未修改。"}
         if result["result"].get("applied") is not True:
@@ -257,6 +264,12 @@ class NativeBackend:
                     return {'state': 'rejected', 'reply': '这条消息编号已存在，未重复加入队列。'}
                 if len(rows) >= 200:
                     return {'state': 'rejected', 'reply': 'Desktop 可见待发送列表已达到上限，这条消息未发送、未排队。'}
+                # The native operation replaces the whole snapshot.  Take a
+                # second read immediately before dispatch so a concurrent
+                # Desktop/UI update is rejected instead of being overwritten.
+                latest_rows = catalog.saved_queue_rows(thread_id)
+                if latest_rows != rows:
+                    return {'state': 'rejected', 'reply': 'Desktop 可见队列正在变化，这条消息未发送、未排队；请重新查看队列后重发。'}
                 row = {
                     'id': operation_id,
                     'text': text,
@@ -282,7 +295,8 @@ class NativeBackend:
                 for _ in range(5):
                     after_rows = catalog.saved_queue_rows(thread_id)
                     matches = [item for item in after_rows if item.get('id') == operation_id]
-                    if len(matches) == 1 and matches[0] == row:
+                    preserved = all(any(item == original for item in after_rows) for original in rows)
+                    if preserved and len(matches) == 1 and matches[0] == row:
                         entry = normalize_saved_queue([matches[0]])[0]
                         break
                     time.sleep(0.05)
@@ -389,7 +403,7 @@ class NativeBackend:
         result = self.call(thread_id, 'thread-follower-steer-turn', {
             'input': inputs, 'clientUserMessageId': operation_id, 'attachments': [],
             'restoreMessage': {'input': inputs, 'cwd': before['cwd'], 'context': context},
-        }, 1, expected_owner=before['owner_id'])
+        }, 1, expected_owner=before['owner_id'], expected_connection=connection)
         response = result.get('result')
         value = response.get('result') if isinstance(response, dict) else None
         if result['state'] == 'confirmed' and isinstance(value, dict) and isinstance(value.get('turnId'), str) and value['turnId']:
@@ -453,14 +467,24 @@ class NativeBackend:
             with self.pipe_factory() as pipe:
                 client = DesktopClient(pipe)
                 client.initialize()
-                if expected_connection is not None and pipe_server_identity(pipe)[0] != expected_connection:
-                    raise DesktopControlError('desktop-changed-before-dispatch')
+                # The production Windows pipe exposes a process identity handle.
+                # Small protocol fakes and alternate tested transports do not;
+                # their caller has already performed the generation probe.
+                if expected_connection is not None and hasattr(pipe, 'handle'):
+                    if pipe_server_identity(pipe)[0] != expected_connection:
+                        raise DesktopControlError('desktop-changed-before-dispatch')
                 owner = client.owner(thread_id)
                 if expected_owner is not None and owner != expected_owner:
                     raise DesktopControlError('owner-changed-before-dispatch')
                 if self.contract_check is None:
                     from control_contract import check_method_contract
                     check_method_contract(pipe_server_identity(pipe)[2], method, version)
+                # Recheck directly before the mutating RPC. A restarted Desktop
+                # can reuse the same thread owner after the initial discovery;
+                # never send an old QQ card into that new generation.
+                if expected_connection is not None and hasattr(pipe, 'handle'):
+                    if pipe_server_identity(pipe)[0] != expected_connection:
+                        raise DesktopControlError('desktop-changed-before-dispatch')
                 sent = True
                 if method == QUEUED_FOLLOWUPS_METHOD:
                     state = params.get('state')
@@ -474,7 +498,7 @@ class NativeBackend:
                 if response.get("handledByClientId") != owner:
                     raise DesktopControlError("owner-mismatch")
                 return {"state": "confirmed", "result": response["result"]}
-        except (OSError, TimeoutError, DesktopControlError, ValueError) as error:
+        except (AttributeError, OSError, TimeoutError, DesktopControlError, ValueError) as error:
             return {"state": "unknown" if sent else "rejected", "error": str(error)[:120]}
 
     def control_state(self, thread_id: str) -> dict:
@@ -524,14 +548,15 @@ class NativeBackend:
             return {'state': 'unknown', 'reply': '移除返回的记录未能与原回执完整对应，结果未确认；不会重复删除，请核对电脑。'}
         return {'state': 'confirmed', 'reply': '原生窗口已移除这一个排队条目，没有清空其他消息。若已被消费，删除不能撤回模型已经开始的工作。'}
 
-    def remove_saved_queue_item(self, thread_id: str, entry: dict, catalog: Any) -> dict:
+    def remove_saved_queue_item(self, thread_id: str, entry: dict, catalog: Any,
+                                connection: str | None = None) -> dict:
         self.require_extended_contract()
         current = next((x for x in catalog.saved_queue(thread_id) if x['id'] == entry['id']), None)
         if current is None or current['digest'] != entry['digest'] or current['status'] != 'queued':
             return {'state': 'rejected', 'reply': '这条排队消息已开始、变化或不再存在，未删除。请重新查看队列。'}
         before = self.snapshot(thread_id)
         result = self.call(thread_id, 'thread-follower-remove-queued-message', {'messageId': entry['id']}, 1,
-                           expected_owner=before['owner_id'])
+                           expected_owner=before['owner_id'], expected_connection=connection)
         if result['state'] != 'confirmed':
             return {'state': result['state'], 'reply': '删除未取得确认，可能已生效；不会重复删除，请重新查看队列。' if result['state'] == 'unknown' else '无法删除，未发送操作。'}
         removed = result['result'].get('removed')
@@ -558,7 +583,8 @@ class NativeBackend:
         except ValueError as error:
             return {'state': 'rejected', 'reply': str(error)}
         result = self.call(data['thread_id'], REQUEST_METHODS[data['method']],
-                           {'requestId': data['request_id'], **payload}, 1, expected_owner=data['owner_id'])
+                           {'requestId': data['request_id'], **payload}, 1,
+                           expected_owner=data['owner_id'], expected_connection=data.get('connection'))
         if result['state'] != 'confirmed' or result['result'].get('ok') is not True:
             return {'state': result['state'] if result['state'] != 'confirmed' else 'unknown',
                     'reply': '答复未取得有效确认，可能已提交；不会自动重发。请重新查询待办。'}
@@ -566,7 +592,8 @@ class NativeBackend:
         # Do not claim our decision won that race or that the model has resumed.
         return {'state': 'confirmed', 'reply': '窗口已受理本次答复；若已在电脑处理，以原生处理结果为准。未发送新的模型任务。'}
 
-    def update_permissions(self, thread_id: str, changes: dict, baseline: dict) -> dict:
+    def update_permissions(self, thread_id: str, changes: dict, baseline: dict,
+                           connection: str | None = None) -> dict:
         self.require_extended_contract()
         allowed = {'sandboxPolicy', 'approvalPolicy', 'approvalsReviewer', 'activePermissionProfile'}
         if (set(changes) != allowed or changes.get('approvalPolicy') not in ('never', 'on-request')
@@ -585,7 +612,7 @@ class NativeBackend:
         result = self.call(thread_id, 'thread-follower-update-thread-settings', {
             'threadSettings': changes,
             'condition': {'ifModelEquals': before['model'], 'ifEffortEquals': before['effort']},
-        }, 2, expected_owner=before['owner_id'])
+        }, 2, expected_owner=before['owner_id'], expected_connection=connection)
         if result['state'] != 'confirmed' or result['result'].get('applied') is not True:
             return {'state': result['state'] if result['state'] != 'confirmed' else 'rejected', 'reply': '权限没有得到有效确认；可能已生效时不会重复修改，请查看电脑。'}
         try:
@@ -597,18 +624,19 @@ class NativeBackend:
             return {'state': 'unknown', 'reply': '窗口已受理权限修改，但回读未确认；不会重试，请查看电脑。'}
         return {'state': 'confirmed', 'reply': '权限已保存并回读确认，仅影响此对话后续轮次，当前任务不变。'}
 
-    def compact(self, thread_id: str) -> dict:
+    def compact(self, thread_id: str, connection: str | None = None) -> dict:
         before = self.control_state(thread_id)
         if (before['turn'].get('status') == 'inProgress' or before.get('pending')
                 or (before.get('runtime') or {}).get('type') == 'active' or before['requests']):
             return {'state': 'rejected', 'reply': '对话正在运行或等待处理，未压缩。请等本轮结束后再试。'}
-        result = self.call(thread_id, 'thread-follower-compact-thread', {}, 1, expected_owner=before['owner_id'])
+        result = self.call(thread_id, 'thread-follower-compact-thread', {}, 1,
+                           expected_owner=before['owner_id'], expected_connection=connection)
         accepted = result['state'] == 'confirmed' and result['result'].get('ok') is True
         return {'state': 'confirmed' if accepted else result['state'] if result['state'] != 'confirmed' else 'unknown',
                 'reply': '原生窗口已受理压缩，不等于压缩完成。引用本条发送“压缩状态”查询；压缩会调用模型并可能消耗额度。' if accepted else '压缩未取得有效确认，可能已开始；不会自动重试。请查看电脑。',
                 'baseline': before['compactions'], 'owner_id': before['owner_id']}
 
-    def pause(self, thread_id: str) -> dict[str, Any]:
+    def pause(self, thread_id: str, connection: str | None = None) -> dict[str, Any]:
         # Preserve the already verified native user-stop behavior.
-        ok, text = pause_desktop(thread_id, pipe_factory=self.pipe_factory)
+        ok, text = pause_desktop(thread_id, expected_connection=connection, pipe_factory=self.pipe_factory)
         return {"state": "confirmed" if ok else "unknown" if "可能" in text or "确认" in text else "rejected", "reply": text}

@@ -214,9 +214,35 @@ class BridgeProcessEncodingTests(unittest.TestCase):
                 "PYTHONUTF8": "0", "PYTHONIOENCODING": "gbk",
                 "CC_SESSION_KEY": "qqbot:encoding-test", "CC_DATA_DIR": directory,
             })
-            result = subprocess.run(command, input=data, capture_output=True, env=env, timeout=15)
-        self.assertEqual(result.returncode, 0, result.stderr.decode("utf-8", errors="replace"))
-        return [json.loads(line) for line in result.stdout.decode("utf-8", errors="strict").splitlines()]
+            # Start the ACP bridge before stamping/sending the test events.
+            # This mirrors the real gateway: a prompt arriving after the
+            # bridge generation is ready is valid, while a pre-start buffered
+            # event must be discarded by the restart cutoff.
+            process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       stderr=subprocess.PIPE, env=env)
+            try:
+                process.stdin.write((json.dumps({"jsonrpc": "2.0", "id": 0,
+                    "method": "session/new", "params": {}}) + "\n").encode("utf-8"))
+                process.stdin.flush()
+                handshake = process.stdout.readline()
+                live_time = time.time() * 1000
+                for request in requests:
+                    request["params"]["_meta"]["cc_connect"]["sent_at_ms"] = live_time
+                live_data = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in requests).encode("utf-8")
+                process.stdin.write(live_data)
+                process.stdin.close()
+                output = handshake + process.stdout.read()
+                error = process.stderr.read()
+                returncode = process.wait(timeout=15)
+                process.stdout.close()
+                process.stderr.close()
+            except BaseException:
+                process.kill()
+                process.wait(timeout=5)
+                raise
+        self.assertEqual(returncode, 0, error.decode("utf-8", errors="replace"))
+        messages = [json.loads(line) for line in output.decode("utf-8", errors="strict").splitlines()]
+        return [message for message in messages if message.get("id") != 0]
 
     def test_entrypoint_reads_chinese_quote_and_replies_in_utf8(self) -> None:
         responses = self.run_bridge([f"[引用消息]\n【中文提醒😀】\n对话编号：{THREAD}"])

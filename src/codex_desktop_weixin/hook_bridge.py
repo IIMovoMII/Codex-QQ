@@ -100,13 +100,19 @@ def request_runtime_autostart(
         if runtime_mode(root) != 'desktop':
             return False
         from launcher import read_cc_connect_pid, read_monitor_pid
+        from notifier import DeliverySettings
+        delivery_mode = DeliverySettings.load(root / 'settings.json').mode
 
         # Desktop/session classification and retries belong to the helper, not
         # the synchronous hook that can race Desktop's first process snapshot.
         if not should_autostart_runtime(
             event_name,
             monitor_running=read_monitor_pid(root, require_ready=True) is not None,
-            cc_connect_running=read_cc_connect_pid(root) is not None,
+            # Shadow delivery has no gateway to start.  Requiring a CC
+            # Connect PID here used to spawn one helper for every hook event
+            # even though the monitor was already healthy.
+            cc_connect_running=(delivery_mode != 'cc-connect'
+                                or read_cc_connect_pid(root) is not None),
             desktop_alive=True,
         ):
             return False

@@ -1,0 +1,456 @@
+diff --git a/core/engine.go b/core/engine.go
+index b2d7d4d..0ef44ed 100644
+--- a/core/engine.go
++++ b/core/engine.go
+@@ -3367,6 +3367,11 @@ func (e *Engine) handlePendingPermission(p Platform, msg *Message, content strin
+ 		return false
+ 	}
+ found:
++	if msg.IsPermissionResponse && msg.PermissionRequestID != "" && msg.PermissionRequestID != pending.RequestID {
++		slog.Debug("dropping stale permission callback (request mismatch)",
++			"session", msg.SessionKey, "request", msg.PermissionRequestID)
++		return true
++	}
+ 
+ 	// AskUserQuestion: interpret user response as an answer, not a permission decision
+ 	if len(pending.Questions) > 0 {
+@@ -5472,7 +5477,7 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
+ 				}
+ 				toolInput := truncateIf(event.ToolInput, permLimit)
+ 				prompt := fmt.Sprintf(e.i18n.T(MsgPermissionPrompt), event.ToolName, toolInput)
+-				e.sendPermissionPrompt(p, replyCtx, prompt, event.ToolName, toolInput)
++				e.sendPermissionPromptWithRequestID(p, replyCtx, prompt, event.ToolName, toolInput, event.RequestID)
+ 			}
+ 
+ 			// Stop idle timer while waiting for user permission response;
+@@ -11483,6 +11488,10 @@ func (e *Engine) resolveOutboundSessionTarget(sessionKey string, hasAttachments
+ // sendPermissionPrompt sends a permission prompt with interactive buttons when
+ // the platform supports them. Fallback chain: InlineButtonSender → CardSender → plain text.
+ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName, toolInput string) {
++	e.sendPermissionPromptWithRequestID(p, replyCtx, prompt, toolName, toolInput, "")
++}
++
++func (e *Engine) sendPermissionPromptWithRequestID(p Platform, replyCtx any, prompt, toolName, toolInput, requestID string) {
+ 	e.hooks.Emit(HookEvent{
+ 		Event:    HookEventPermissionRequested,
+ 		Platform: p.Name(),
+@@ -11494,11 +11503,11 @@ func (e *Engine) sendPermissionPrompt(p Platform, replyCtx any, prompt, toolName
+ 	if bs, ok := p.(InlineButtonSender); ok {
+ 		buttons := [][]ButtonOption{
+ 			{
+-				{Text: e.i18n.T(MsgPermBtnAllow), Data: "perm:allow"},
+-				{Text: e.i18n.T(MsgPermBtnDeny), Data: "perm:deny"},
++				{Text: e.i18n.T(MsgPermBtnAllow), Data: "perm:allow", PermissionRequestID: requestID},
++				{Text: e.i18n.T(MsgPermBtnDeny), Data: "perm:deny", PermissionRequestID: requestID},
+ 			},
+ 			{
+-				{Text: e.i18n.T(MsgPermBtnAllowAll), Data: "perm:allow_all"},
++				{Text: e.i18n.T(MsgPermBtnAllowAll), Data: "perm:allow_all", PermissionRequestID: requestID},
+ 			},
+ 		}
+ 		if err := e.waitOutgoing(p); err != nil {
+diff --git a/core/interfaces.go b/core/interfaces.go
+index 81f4d1c..76c31c1 100644
+--- a/core/interfaces.go
++++ b/core/interfaces.go
+@@ -332,6 +332,9 @@ type ProgressUpdateThrottler interface {
+ type ButtonOption struct {
+ 	Text string // display text on the button
+ 	Data string // callback data returned when clicked (≤64 bytes for Telegram)
++	// PermissionRequestID binds a permission button to the exact pending
++	// request. Adapters may use it to reject stale callbacks.
++	PermissionRequestID string
+ }
+ 
+ // InlineButtonSender is an optional interface for platforms that support
+diff --git a/core/message.go b/core/message.go
+index e361dac..0eb86be 100644
+--- a/core/message.go
++++ b/core/message.go
+@@ -395,6 +395,10 @@ type Message struct {
+ 	// "allow"/"deny" typed by a real user must NOT set this flag — they
+ 	// continue to flow through the regular message handler.
+ 	IsPermissionResponse bool
++	// PermissionRequestID is set by a trusted interactive button adapter. It
++	// prevents an old permission card from resolving a newer request in the
++	// same session. Plain text responses leave it empty.
++	PermissionRequestID string
+ 	// UserMessageTimeMs is the platform message creation time in Unix milliseconds
+ 	// when known (e.g. Feishu im.message.message_received create_time). Used to
+ 	// drop late redeliveries that reuse a new message_id but an older create_time
+diff --git a/platform/qqbot/control_reference.go b/platform/qqbot/control_reference.go
+index 6c3555a..63d51a7 100644
+--- a/platform/qqbot/control_reference.go
++++ b/platform/qqbot/control_reference.go
+@@ -7,10 +7,13 @@ import (
+ 	"os"
+ 	"path/filepath"
+ 	"regexp"
++	"sort"
+ 	"strings"
+ )
+ 
+-var controlFooterLine = regexp.MustCompile(`^(对话编号：[A-Za-z0-9_-]{20,100}|引用标识：[A-Za-z0-9_-]{12})$`)
++var controlFooterLine = regexp.MustCompile(`^(对话编号：[A-Za-z0-9_-]{20,100}|引用标识：[A-Za-z0-9_-]{12}|异步问题对话：[A-Za-z0-9_-]{20,100}|提问编号：[A-Za-z0-9_-]{1,160})$`)
++
++const controlReferenceMaxItems = 256
+ 
+ // Only a routing footer is kept long term, not message content. Hash buckets
+ // avoid loading all historical references into memory for an old quotation.
+@@ -61,6 +64,18 @@ func (p *Platform) saveControlReference(id, content string) error {
+ 		return err
+ 	}
+ 	refs[id] = footer
++	if len(refs) > controlReferenceMaxItems {
++		// The on-disk format predates timestamps, so retain a deterministic
++		// bounded subset rather than allowing one bucket to grow forever.
++		keys := make([]string, 0, len(refs))
++		for key := range refs {
++			keys = append(keys, key)
++		}
++		sort.Strings(keys)
++		for _, key := range keys[:len(keys)-controlReferenceMaxItems] {
++			delete(refs, key)
++		}
++	}
+ 	data, err := json.Marshal(refs)
+ 	if err != nil {
+ 		return err
+diff --git a/platform/qqbot/permission_token_test.go b/platform/qqbot/permission_token_test.go
+new file mode 100644
+index 0000000..9ee65db
+--- /dev/null
++++ b/platform/qqbot/permission_token_test.go
+@@ -0,0 +1,86 @@
++package qqbot
++
++import (
++	"encoding/json"
++	"testing"
++
++	"github.com/chenhg5/cc-connect/core"
++)
++
++func interactionPayload(id, user, buttonData string) []byte {
++	payload := map[string]any{
++		"id": id, "user_openid": user, "chat_type": 2,
++		"data": map[string]any{"type": 11, "resolved": map[string]any{"button_data": buttonData}},
++	}
++	data, _ := json.Marshal(payload)
++	return data
++}
++
++func TestPermissionButtonBindsExactRequestAndConsumesToken(t *testing.T) {
++	p := &Platform{allowFrom: "allowed-user"}
++	p.permissionStrict.Store(true)
++	token := p.newPermissionToken("qqbot:allowed-user", "request-new")
++	var got *core.Message
++	p.handler = func(_ core.Platform, msg *core.Message) { got = msg }
++
++	p.handleInteractionCreate(interactionPayload("interaction-1", "allowed-user", "perm:allow:"+token))
++	if got == nil || got.PermissionRequestID != "request-new" || got.SessionKey != "qqbot:allowed-user" {
++		t.Fatalf("permission callback lost request binding: %#v", got)
++	}
++	got = nil
++	p.handleInteractionCreate(interactionPayload("interaction-2", "allowed-user", "perm:allow:"+token))
++	if got != nil {
++		t.Fatal("one-time permission token was reusable")
++	}
++}
++
++func TestPermissionButtonRejectsUnauthorizedAndLegacyAfterStrictMode(t *testing.T) {
++	p := &Platform{allowFrom: "allowed-user,other-user"}
++	p.permissionStrict.Store(true)
++	token := p.newPermissionToken("qqbot:allowed-user", "request-new", &replyContext{messageType: "c2c", userOpenID: "allowed-user"})
++	called := false
++	p.handler = func(_ core.Platform, _ *core.Message) { called = true }
++	p.handleInteractionCreate(interactionPayload("interaction-wrong-actor", "other-user", "perm:allow:"+token))
++	if called {
++		t.Fatal("actor-mismatched button interaction reached the engine")
++	}
++	// The rejected actor must not consume the token; the bound actor can still
++	// use the same card exactly once.
++	p.handleInteractionCreate(interactionPayload("interaction-authorized", "allowed-user", "perm:allow:"+token))
++	if !called {
++		t.Fatal("authorized actor could not use an unconsumed permission token")
++	}
++	called = false
++	p.handleInteractionCreate(interactionPayload("interaction-legacy", "allowed-user", "perm:allow:qqbot:allowed-user"))
++	if called {
++		t.Fatal("legacy session-only permission button reached strict mode")
++	}
++}
++
++func TestGroupMessagesAreIgnoredByPrivateChatAdapter(t *testing.T) {
++	p := &Platform{allowFrom: "*"}
++	called := false
++	p.handler = func(_ core.Platform, _ *core.Message) { called = true }
++	p.handleDispatch("GROUP_AT_MESSAGE_CREATE", []byte(`{"id":"group-message","group_openid":"group","content":"绑定","author":{"member_openid":"user"}}`))
++	if called {
++		t.Fatal("group message reached the private-chat adapter")
++	}
++}
++
++func TestControlFooterPreservesAsyncQuestionRouting(t *testing.T) {
++	content := "异步问题提醒\n\n异步问题对话：00000000-0000-7000-8000-000000000001\n提问编号：call_test"
++	want := "异步问题对话：00000000-0000-7000-8000-000000000001\n提问编号：call_test"
++	if got := controlFooter(content); got != want {
++		t.Fatalf("controlFooter() = %q, want %q", got, want)
++	}
++}
++
++func TestC2CMessagesWithoutUserIdentityAreIgnored(t *testing.T) {
++	p := &Platform{allowFrom: "*"}
++	called := false
++	p.handler = func(_ core.Platform, _ *core.Message) { called = true }
++	p.handleC2CMessage([]byte(`{"id":"message-without-user","content":"绑定","author":{}}`))
++	if called {
++		t.Fatal("c2c message without an author identity reached the engine")
++	}
++}
+diff --git a/platform/qqbot/qqbot.go b/platform/qqbot/qqbot.go
+index 890eb2d..af3a2ee 100644
+--- a/platform/qqbot/qqbot.go
++++ b/platform/qqbot/qqbot.go
+@@ -3,7 +3,9 @@ package qqbot
+ import (
+ 	"bytes"
+ 	"context"
++	"crypto/rand"
+ 	"encoding/base64"
++	"encoding/hex"
+ 	"encoding/json"
+ 	"fmt"
+ 	"io"
+@@ -99,6 +101,19 @@ type Platform struct {
+ 	messageCacheMu   sync.Mutex
+ 	messageCache     map[string]cachedMessage
+ 	messageCachePath string
++
++	permissionMu     sync.Mutex
++	permissionTokens map[string]permissionToken
++	permissionStrict atomic.Bool
++}
++
++type permissionToken struct {
++	sessionKey string
++	requestID  string
++	userOpenID string
++	groupOpenID string
++	chatType   string
++	createdAt  time.Time
+ }
+ 
+ // msgSeqEntry tracks msg_seq counter with a creation timestamp for TTL eviction.
+@@ -171,7 +186,7 @@ func New(opts map[string]any) (core.Platform, error) {
+ 
+ 	core.CheckAllowFrom("qqbot", allowFrom)
+ 	dataDir, _ := opts["cc_data_dir"].(string)
+-	return &Platform{
++	platform := &Platform{
+ 		appID:                 appID,
+ 		appSecret:             appSecret,
+ 		sandbox:               sandbox,
+@@ -180,7 +195,12 @@ func New(opts map[string]any) (core.Platform, error) {
+ 		intents:               intents,
+ 		markdownSupport:       markdownSupport,
+ 		messageCachePath:      qqbotMessageCachePath(dataDir),
+-	}, nil
++	}
++	// Codex-QQ uses request-bound permission cards. Do not accept legacy
++	// session-only cards after a gateway restart, when their request context is
++	// no longer available in memory.
++	platform.permissionStrict.Store(true)
++	return platform, nil
+ }
+ 
+ func (p *Platform) Name() string { return "qqbot" }
+@@ -441,10 +461,15 @@ func (p *Platform) SendWithButtons(ctx context.Context, replyCtx any, content st
+ 	for i, row := range buttons {
+ 		var btns []map[string]any
+ 		for j, btn := range row {
+-			// Encode decision + session key into button_data so we can route
+-			// the INTERACTION_CREATE event back to the right session.
+-			// btn.Data is already "perm:allow", "perm:deny", or "perm:allow_all"
++			// Permission buttons carry a one-time token bound to the exact
++			// pending request. A session-only payload lets an old card answer a
++			// newer request after the first one is resolved.
+ 			buttonData := btn.Data + ":" + sessionKey
++			if strings.HasPrefix(btn.Data, buttonDataPrefix) && btn.PermissionRequestID != "" {
++				p.permissionStrict.Store(true)
++				token := p.newPermissionToken(sessionKey, btn.PermissionRequestID, rctx)
++				buttonData = btn.Data + ":" + token
++			}
+ 
+ 			btnID := fmt.Sprintf("b_%d_%d", i, j)
+ 			visitedLabel := "已操作"
+@@ -1028,7 +1053,10 @@ func (p *Platform) sendResume(conn *websocket.Conn, token string) error {
+ func (p *Platform) handleDispatch(eventType string, data json.RawMessage) {
+ 	switch eventType {
+ 	case "GROUP_AT_MESSAGE_CREATE":
+-		p.handleGroupMessage(data)
++		// Codex-QQ is intentionally private-chat only. Keep the upstream group
++		// intent for compatibility, but never route group input into the local
++		// controller or the general agent.
++		slog.Debug("qqbot: ignoring group message for Codex-QQ private-chat adapter")
+ 	case "C2C_MESSAGE_CREATE":
+ 		p.handleC2CMessage(data)
+ 	case "INTERACTION_CREATE":
+@@ -1073,8 +1101,16 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
+ 
+ 	// ACK the interaction (required by QQ Bot API to prevent "请求超时" on buttons)
+ 	_ = p.ackInteraction(d.ID)
++	if p.dedup.IsDuplicate("interaction:" + d.ID) {
++		slog.Debug("qqbot: duplicate interaction ignored", "id", d.ID)
++		return
++	}
+ 
+-	// Parse button_data: perm:<decision>:<session_key>
++	// Parse current permission data: perm:<decision>:<one-time-token>.
++	// Before the first request-aware card is issued, accept the legacy format
++	// only for compatibility with already-running adapters. Once strict mode is
++	// enabled, session-only cards are rejected instead of targeting whichever
++	// request happens to be pending now.
+ 	buttonData := d.Data.Resolved.ButtonData
+ 	if !strings.HasPrefix(buttonData, buttonDataPrefix) {
+ 		slog.Debug("qqbot: unknown interaction button_data format", "data", buttonData)
+@@ -1082,18 +1118,20 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
+ 	}
+ 
+ 	rest := strings.TrimPrefix(buttonData, buttonDataPrefix)
+-	// rest = "<decision>:<session_key>"
++	// rest = "<decision>:<one-time-token>"
+ 	colonIdx := strings.Index(rest, ":")
+ 	if colonIdx < 0 {
+ 		slog.Warn("qqbot: invalid interaction button_data", "data", buttonData)
+ 		return
+ 	}
+ 	decision := rest[:colonIdx]
+-	sessionKey := rest[colonIdx+1:]
+-	if decision == "" || sessionKey == "" {
++	token := rest[colonIdx+1:]
++	if decision == "" || token == "" {
+ 		slog.Warn("qqbot: empty decision or session_key in button_data", "data", buttonData)
+ 		return
+ 	}
++	sessionKey := token
++	requestID := ""
+ 
+ 	// Map decision to response text the engine understands
+ 	var responseText string
+@@ -1111,17 +1149,15 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
+ 
+ 	// Build reply context for sending confirmation messages
+ 	var rctx *replyContext
+-	var userID string
++	var userID, groupID, chatType string
+ 	switch d.ChatType {
+ 	case 1: // group
+-		rctx = &replyContext{
+-			messageType: "group",
+-			groupOpenID: d.GroupOpenID,
+-			userOpenID:  d.GroupMemberOpenID,
+-			sessionKey:  sessionKey,
+-		}
+-		userID = d.GroupMemberOpenID
++		// Permission interactions are private-chat only as well; never allow a
++		// group button to resolve a local Codex request.
++		slog.Debug("qqbot: ignoring group permission interaction")
++		return
+ 	case 2: // c2c
++		chatType = "c2c"
+ 		rctx = &replyContext{
+ 			messageType: "c2c",
+ 			userOpenID:  d.UserOpenID,
+@@ -1132,6 +1168,22 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
+ 		slog.Warn("qqbot: unknown interaction chat_type", "chat_type", d.ChatType)
+ 		return
+ 	}
++	if !core.AllowList(p.allowFrom, userID) {
++		slog.Warn("qqbot: unauthorized interaction ignored", "user_hash", deliveryHash(userID))
++		return
++	}
++	// Validate the actor and chat before consuming the one-time token. An
++	// unauthorized click must not burn the token for the authorized user.
++	permission := p.takePermissionToken(token, userID, groupID, chatType)
++	if permission == nil && p.permissionStrict.Load() {
++		slog.Debug("qqbot: stale, unknown, or actor-mismatched permission button", "token", token)
++		return
++	}
++	if permission != nil {
++		sessionKey = permission.sessionKey
++		requestID = permission.requestID
++		rctx.sessionKey = sessionKey
++	}
+ 
+ 	// Create synthetic message and forward to engine as a permission response
+ 	msg := &core.Message{
+@@ -1142,6 +1194,7 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
+ 		Content:              responseText,
+ 		ReplyCtx:             rctx,
+ 		IsPermissionResponse: true,
++		PermissionRequestID:  requestID,
+ 	}
+ 
+ 	slog.Debug("qqbot: forwarding button click as permission response",
+@@ -1149,6 +1202,50 @@ func (p *Platform) handleInteractionCreate(data json.RawMessage) {
+ 	p.handler(p, msg)
+ }
+ 
++func (p *Platform) newPermissionToken(sessionKey, requestID string, contexts ...*replyContext) string {
++	var raw [9]byte
++	if _, err := rand.Read(raw[:]); err != nil {
++		copy(raw[:], []byte(requestID))
++	}
++	token := hex.EncodeToString(raw[:])
++	p.permissionMu.Lock()
++	if p.permissionTokens == nil {
++		p.permissionTokens = make(map[string]permissionToken)
++	}
++	cutoff := time.Now().Add(-30 * time.Minute)
++	for key, value := range p.permissionTokens {
++		if value.createdAt.Before(cutoff) {
++			delete(p.permissionTokens, key)
++		}
++	}
++	var userOpenID, groupOpenID, chatType string
++	if len(contexts) > 0 && contexts[0] != nil {
++		userOpenID, groupOpenID, chatType = contexts[0].userOpenID, contexts[0].groupOpenID, contexts[0].messageType
++	}
++	p.permissionTokens[token] = permissionToken{sessionKey: sessionKey, requestID: requestID,
++		userOpenID: userOpenID, groupOpenID: groupOpenID, chatType: chatType, createdAt: time.Now()}
++	p.permissionMu.Unlock()
++	return token
++}
++
++func (p *Platform) takePermissionToken(token string, actor ...string) *permissionToken {
++	p.permissionMu.Lock()
++	value, ok := p.permissionTokens[token]
++	if !ok || value.createdAt.Before(time.Now().Add(-30*time.Minute)) {
++		p.permissionMu.Unlock()
++		return nil
++	}
++	if len(actor) >= 3 && ((value.userOpenID != "" && value.userOpenID != actor[0]) ||
++		(value.groupOpenID != "" && value.groupOpenID != actor[1]) ||
++		(value.chatType != "" && value.chatType != actor[2])) {
++		p.permissionMu.Unlock()
++		return nil
++	}
++	delete(p.permissionTokens, token)
++	p.permissionMu.Unlock()
++	return &value
++}
++
+ // ackInteraction acknowledges an INTERACTION_CREATE event.
+ // Uses the same pattern as hermes-agent: PUT /interactions/{id}
+ // with JSON body {"code": 0}. Note: no /v2/ prefix for this endpoint.
+@@ -1264,7 +1361,8 @@ func (p *Platform) handleC2CMessage(data json.RawMessage) {
+ 		return
+ 	}
+ 
+-	if d.ID == "" {
++	if d.ID == "" || strings.TrimSpace(d.Author.UserOpenID) == "" {
++		slog.Debug("qqbot: ignoring c2c message without a user identity", "id", d.ID)
+ 		return
+ 	}
+ 

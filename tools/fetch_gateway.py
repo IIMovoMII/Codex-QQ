@@ -99,6 +99,15 @@ def fetch(*, target: Path, tag: str = RELEASE_TAG, repository: str = REPOSITORY)
         raise ValueError('未核实的网关发布标签或仓库')
     target = target.resolve()
     target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.with_suffix('.staged.exe')
+    # A hard-terminated installer can leave its own staged binary behind.
+    # Reuse it only after verifying the immutable release hash; never delete or
+    # overwrite an unknown file automatically.
+    if staged.exists():
+        if _sha256(staged) != BINARY_SHA256:
+            raise FileExistsError('发现未完成的网关暂存文件且校验不匹配，未覆盖；请人工核对后再重试')
+        _publish_no_replace(staged, target)
+        return _result(target, cached=False)
     base = f'https://github.com/{repository}/releases/download/{tag}'
     with tempfile.TemporaryDirectory(prefix='codex-qq-gateway-') as temp_name:
         temp = Path(temp_name)
@@ -131,7 +140,6 @@ def fetch(*, target: Path, tag: str = RELEASE_TAG, repository: str = REPOSITORY)
             binary_hash = hashlib.sha256(binary).hexdigest()
             if binary_hash != info.get('binary_sha256') or binary_hash != BINARY_SHA256:
                 raise ValueError('网关二进制校验失败，未写入本机')
-            staged = target.with_suffix('.staged.exe')
             created = False
             try:
                 with staged.open('xb') as stream:

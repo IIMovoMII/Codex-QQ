@@ -6,10 +6,10 @@ import getpass
 import hashlib
 import json
 import os
+import secrets
 from pathlib import Path
 import re
 import sys
-import tempfile
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,25 +81,29 @@ def prepare(root: Path, runtime: Path, cc_data: Path, app_id: str, secret: str, 
     if len(str(cc_data / 'run/api.sock').encode('utf-8')) >= 104:
         raise ValueError('QQ 数据路径过长，请用 --cc-data-dir 指定更短的当前用户私有目录。')
     text = config_text(root, cc_data, app_id, secret, sandbox=sandbox)
-    staged = stage_bytes(runtime, text.encode('utf-8'))
     pending = runtime / 'setup-pending.json'
+    runtime.mkdir(parents=True, exist_ok=True)
+    staged_name = _new_stage_name('config')
     state = {'version': 2, 'phase': 'preparing', 'root': str(root.resolve()),
              'config_sha256': sha(text.encode('utf-8')), 'cc_data': str(cc_data.resolve()),
-             'staged': staged.name}
+             'staged': staged_name}
     try:
         # Write-ahead marker precedes publishing the config. A crash at either
         # rename is recoverable; two renames are NOT a cross-file transaction.
         if pending.exists() or config.exists() or (runtime / 'settings.json').exists():
             raise ValueError('配置在准备期间出现，未覆盖；请核对现有安装。')
-        candidate = stage_bytes(runtime, b'')
-        try:
-            atomic_write_json(candidate, state)
-            publish_new(candidate, pending)
-        finally:
-            candidate.unlink(missing_ok=True)
+        atomic_write_json(pending, state)
+        stage_bytes_at(runtime, text.encode('utf-8'), staged_name)
     except BaseException:
-        if not pending.exists():
-            staged.unlink(missing_ok=True)  # created by this invocation only
+        # The marker was created by this invocation and no user config has been
+        # published yet. Remove only this transaction's exact paths.
+        try:
+            if pending.exists() and _state(root, runtime).get('staged') == staged_name:
+                pending.unlink()
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        (runtime / (staged_name + '.part')).unlink(missing_ok=True)
+        (runtime / staged_name).unlink(missing_ok=True)
         raise
     recover_setup(root, runtime)
     return config
@@ -110,16 +114,28 @@ def sha(data: bytes) -> str:
 
 
 def stage_bytes(runtime: Path, payload: bytes) -> Path:
+    return stage_bytes_at(runtime, payload, _new_stage_name('data'))
+
+
+def _new_stage_name(label: str) -> str:
+    return f'.setup-{label}-{secrets.token_hex(8)}.tmp'
+
+
+def stage_bytes_at(runtime: Path, payload: bytes, name: str) -> Path:
     runtime.mkdir(parents=True, exist_ok=True)
-    fd, name = tempfile.mkstemp(prefix='.setup-', suffix='.tmp', dir=runtime)
-    path = Path(name)
+    path = runtime / name
+    if path.exists():
+        raise FileExistsError(path)
+    part = path.with_name(path.name + '.part')
+    fd = os.open(part, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     try:
         with os.fdopen(fd, 'wb') as stream:
             stream.write(payload)
             stream.flush()
             os.fsync(stream.fileno())
+        os.replace(part, path)
     except BaseException:
-        path.unlink(missing_ok=True)
+        part.unlink(missing_ok=True)
         raise
     return path
 
@@ -170,6 +186,11 @@ def pending_phase(root: Path, runtime: Path) -> str:
         if config.exists():
             if not _matching(config, state['config_sha256']):
                 raise ValueError('准备期间配置发生变化，拒绝覆盖；请核对配置与绑定进度。')
+        elif not staged.exists():
+            # A hard stop may happen after the journal is durable but before
+            # the secret staging rename. The journal is still ours and can be
+            # safely abandoned on the next recovery pass.
+            return 'preparing'
         elif not _matching(staged, state['config_sha256']):
             raise ValueError('配置暂存内容缺失或损坏，已保留进度；请人工核对，不要删除已有配置。')
         payload = config if config.exists() else staged
@@ -189,6 +210,10 @@ def recover_setup(root: Path, runtime: Path) -> None:
     state = _state(root, runtime)
     if phase == 'preparing':
         config, staged = runtime / 'cc-connect.toml', _staged(runtime, state)
+        if not config.exists() and not staged.exists():
+            staged.with_name(staged.name + '.part').unlink(missing_ok=True)
+            (runtime / 'setup-pending.json').unlink(missing_ok=True)
+            return
         if not config.exists():
             publish_new(staged, config)
         state['phase'] = 'pairing'
@@ -224,7 +249,12 @@ def bind(root: Path, runtime: Path, openid: str) -> None:
     cc_data = Path(state['cc_data'])
     bound = config_text(root, cc_data, opts['app_id'], opts['app_secret'], openid,
                         sandbox=opts.get('sandbox', False)).encode('utf-8')
-    staged = stage_bytes(runtime, bound)
+    # The stable name lets recovery recognize only this app-owned interrupted
+    # binding stage; it never scans or deletes arbitrary temporary files.
+    staged_name = '.setup-bound.tmp'
+    (runtime / staged_name).unlink(missing_ok=True)
+    (runtime / (staged_name + '.part')).unlink(missing_ok=True)
+    staged = stage_bytes_at(runtime, bound, staged_name)
     state.update(version=2, phase='binding', staged=staged.name, bound_sha256=sha(bound),
                  settings={'mode': 'cc-connect', 'executable': str(executable),
                            'project': PROJECT, 'session': 'qqbot:' + openid, 'data_dir': str(cc_data),
@@ -232,8 +262,12 @@ def bind(root: Path, runtime: Path, openid: str) -> None:
     try:
         atomic_write_json(pending, state)
     except BaseException:
-        if _state(root, runtime).get('phase', 'pairing') == 'pairing':
-            staged.unlink(missing_ok=True)
+        try:
+            if _state(root, runtime).get('phase', 'pairing') == 'pairing':
+                staged.unlink(missing_ok=True)
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        staged.with_name(staged.name + '.part').unlink(missing_ok=True)
         raise
     _complete_binding(root, runtime, state)
 
@@ -268,7 +302,14 @@ def _complete_binding(root: Path, runtime: Path, state: dict) -> None:
         os.replace(staged, config)  # replace only the checked identity-only config
     settings = runtime / 'settings.json'
     if not settings.exists():
-        candidate = stage_bytes(runtime, (json.dumps(state['settings'], ensure_ascii=False, indent=2) + '\n').encode('utf-8'))
+        settings_name = '.setup-settings.tmp'
+        (runtime / settings_name).unlink(missing_ok=True)
+        (runtime / (settings_name + '.part')).unlink(missing_ok=True)
+        candidate = stage_bytes_at(
+            runtime,
+            (json.dumps(state['settings'], ensure_ascii=False, indent=2) + '\n').encode('utf-8'),
+            settings_name,
+        )
         try:
             publish_new(candidate, settings)
         finally:

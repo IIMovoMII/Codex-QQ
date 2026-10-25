@@ -6,6 +6,7 @@ import queue
 import shutil
 import sys
 import time
+from dataclasses import replace as dataclass_replace
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -138,7 +139,12 @@ class DesktopMonitor:
             try:
                 cursor = self.tailer.cursor_for(path)
                 before = cursor.offset if cursor is not None else -1
-                signals = self.tailer.read_new_signals(path)
+                # Keep the cursor on disk at the last successfully applied
+                # boundary.  If notification/state persistence fails, the
+                # same records must be replayable after restart.
+                previous_cursor = self.tailer.cursor_for(path)
+                previous_cursor = dataclass_replace(previous_cursor) if previous_cursor is not None else None
+                signals = self.tailer.read_new_signals(path, persist=False)
                 cursor = self.tailer.cursor_for(path)
                 after = cursor.offset if cursor is not None else before
             except (FileNotFoundError, PermissionError, OSError):
@@ -155,7 +161,12 @@ class DesktopMonitor:
                     for signal in signals
                     if signal.kind == SignalKind.SESSION_STARTED or signal.observed_at >= not_before
                 ]
-            self._apply(signals)
+            try:
+                self._apply(signals)
+                self.tailer.commit()
+            except Exception:
+                self.tailer.restore_cursor(path, previous_cursor)
+                raise
             if after <= before:
                 break
             try:
@@ -310,22 +321,26 @@ class DesktopMonitor:
                             source="process",
                         )
                     )
-        elif previous_desktop_alive and self._active_runtimes():
-            self.process_missing_since = now
-        elif self.process_missing_since is not None and now - self.process_missing_since >= self.config.process_exit_grace_seconds:
-            # Preserve real terminal/error records written before exit, then
-            # silently retire remaining turns. Process exit itself sends no QQ.
-            self._reconcile()
-            for runtime in list(self._active_runtimes()):
-                self._apply([
-                    Signal(
-                        SignalKind.PROCESS_STOPPED,
-                        session_id=runtime.session_id,
-                        turn_id=runtime.turn_id,
-                        source="process",
-                    )
-                ])
-            self.process_missing_since = None
+        elif self._active_runtimes():
+            # The monitor may start after Desktop has already disappeared.
+            # Do not require a previous alive sample or the active turn can
+            # remain running forever and keep the monitor out of standby.
+            if self.process_missing_since is None:
+                self.process_missing_since = now
+            elif now - self.process_missing_since >= self.config.process_exit_grace_seconds:
+                # Preserve real terminal/error records written before exit, then
+                # silently retire remaining turns. Process exit itself sends no QQ.
+                self._reconcile()
+                for runtime in list(self._active_runtimes()):
+                    self._apply([
+                        Signal(
+                            SignalKind.PROCESS_STOPPED,
+                            session_id=runtime.session_id,
+                            turn_id=runtime.turn_id,
+                            source="process",
+                        )
+                    ])
+                self.process_missing_since = None
 
         if status.desktop_alive:
             self.desktop_seen = True
