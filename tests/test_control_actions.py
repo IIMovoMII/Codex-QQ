@@ -4,9 +4,10 @@ import copy
 import json
 import sqlite3
 import tempfile
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import test_control_router as fixtures
 from test_control_router import FakeBackend, THREAD_A
@@ -165,7 +166,7 @@ class ActionRouterTests(unittest.TestCase):
         card = self.send('/use ' + THREAD_A)
         options = self.send('权限', quote=card)
         self.assertIn('已取消', self.send('取消', quote=options))
-        self.assertIn('选项卡已取消', self.send('2', quote=options))
+        self.assertIn('选项卡及其确认卡不再执行', self.send('2', quote=options))
         self.assertEqual(self.backend.permission_updates, [])
 
     def test_cancelled_permission_confirmation_card_cannot_be_reused(self):
@@ -173,8 +174,41 @@ class ActionRouterTests(unittest.TestCase):
         options = self.send('权限', quote=card)
         confirm = self.send('2', quote=options)
         self.assertIn('已取消', self.send('取消', quote=confirm))
-        self.assertIn('确认卡已取消', self.send('确认 完全访问', quote=confirm))
+        self.assertIn('选项卡及其确认卡不再执行', self.send('确认 完全访问', quote=confirm))
         self.assertEqual(self.backend.permission_updates, [])
+
+    def test_queue_guide_preflight_rejection_does_not_consume_one_shot(self):
+        card = self.send('/use ' + THREAD_A)
+        queue = self.send('队列', quote=card)
+        selected = self.send('1', quote=queue)
+        self.backend.preflight_guide_saved_queue_item = Mock(side_effect=[
+            {'state': 'rejected', 'retryable': True, 'reply': '任务仍在初始化，稍后重试。'},
+            {'state': 'confirmed', 'reply': '就绪。'},
+        ])
+        self.assertIn('初始化', self.send('引导', quote=selected))
+        self.assertIn('已先删除', self.send('引导', quote=selected))
+        self.assertEqual(self.backend.preflight_guide_saved_queue_item.call_count, 2)
+        self.assertEqual(len(self.backend.queue_guides), 1)
+
+    def test_permission_cancel_after_success_reports_applied_state(self):
+        card = self.send('/use ' + THREAD_A)
+        options = self.send('权限', quote=card)
+        confirm = self.send('2', quote=options)
+        applied = self.send('确认 完全访问', quote=confirm)
+        cancelled = self.send('取消', quote=confirm)
+        self.assertEqual(cancelled, applied)
+        self.assertNotIn('已取消', cancelled)
+        self.assertEqual(len(self.backend.permission_updates), 1)
+
+    def test_permission_cancel_after_unknown_reports_unknown_without_claiming_cancel(self):
+        card = self.send('/use ' + THREAD_A)
+        options = self.send('权限', quote=card)
+        confirm = self.send('2', quote=options)
+        self.backend.update_permissions = lambda *a, **k: {'state': 'unknown', 'reply': '权限写入结果未知。'}
+        self.assertIn('未知', self.send('确认 完全访问', quote=confirm))
+        reply = self.send('取消', quote=confirm)
+        self.assertIn('未知', reply)
+        self.assertNotIn('已取消', reply)
 
     def test_custom_permissions_cannot_be_reset_from_qq(self):
         card = self.send('/use ' + THREAD_A)
@@ -257,6 +291,26 @@ class ActionPayloadTests(unittest.TestCase):
             upgraded.finish_operation('scope', 'action', 'unknown', '结果未知')
             self.assertEqual(store.claim_operation('scope', 'action')['reply'], '结果未知')
 
+    def test_control_store_reuses_thread_refs_and_expires_old_dispatch_tombstones_safely(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = ControlStore(Path(temp) / 'state.sqlite')
+            first = store.reference('scope', 'thread', {'thread_id': THREAD_A})
+            second = store.reference('scope', 'thread', {'thread_id': THREAD_A})
+            self.assertEqual(first, second)
+            queue_ref = store.reference('scope', 'queued', {'thread_id': THREAD_A, 'id': 'old'}, ttl=None)
+            store.begin('scope', 'message-old', time.time() - 40 * 86400)
+            self.assertIsNone(store.claim_operation('scope', 'old-action'))
+            with store.connect() as db:
+                old = time.time() - 40 * 86400
+                db.execute("UPDATE refs SET created=? WHERE id=?", (old, queue_ref))
+                db.execute("UPDATE receipts SET updated=? WHERE message_id='message-old'", (old,))
+                db.execute("UPDATE operations SET updated=? WHERE key='old-action'", (old,))
+            store.prune()
+            self.assertIsNone(store.get_reference('scope', queue_ref))
+            self.assertIsNotNone(store.get_reference('scope', first))
+            self.assertIn('未知', store.begin('scope', 'message-old', time.time()))
+            self.assertEqual(store.operation('scope', 'old-action')['state'], 'unknown')
+
 
 class NativeActionTests(unittest.TestCase):
     def setUp(self):
@@ -270,6 +324,17 @@ class NativeActionTests(unittest.TestCase):
         result = self.backend.call(THREAD, 'mutation', {}, 1, expected_owner='old-owner')
         self.assertEqual(result['state'], 'rejected')
         self.assertFalse(any(x.get('method') == 'mutation' for x in self.pipe.writes))
+
+    def test_non_object_control_status_is_reported_unavailable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); state = root / 'state'; state.mkdir()
+            path = state / 'control-status.json'
+            backend = NativeBackend()
+            for payload in ('[]', json.dumps({'threads': []})):
+                path.write_text(payload, encoding='utf-8')
+                with patch('runtime_io.default_data_dir', return_value=root):
+                    self.assertIn('状态暂不可用', backend.status(THREAD))
+                self.assertEqual(path.read_text(encoding='utf-8'), payload)
 
     def test_queue_delete_checks_removed_identity_and_consumption_race(self):
         entry = normalize_saved_queue([saved_entry()])[0]

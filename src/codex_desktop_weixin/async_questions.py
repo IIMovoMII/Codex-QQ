@@ -24,17 +24,19 @@ def questions(value: Any) -> list[dict]:
         raise ValueError('unsupported-async-questions')
     result = []
     for q in value:
-        if not isinstance(q, dict) or set(q) - {'title', 'options'}:
+        if not isinstance(q, dict) or set(q) - {'title', 'options', 'question'}:
             raise ValueError('unknown-or-secret-async-question')
-        title, options = q.get('title'), q.get('options', [])
+        title, options, question = q.get('title'), q.get('options', []), q.get('question', '')
         if (not isinstance(title, str) or not 1 <= len(title.strip()) <= 1500
+                or not isinstance(question, str) or len(question) > 2000
                 or not isinstance(options, list) or len(options) > 10
                 or any(not isinstance(x, str) or not 1 <= len(x) <= 160 for x in options)):
             raise ValueError('unsupported-async-question-shape')
         title.encode('utf-8', errors='strict')
+        question.encode('utf-8', errors='strict')
         for option in options:
             option.encode('utf-8', errors='strict')
-        result.append({'title': title, 'options': options})
+        result.append({'title': title, 'options': options, **({'question': question} if question else {})})
     return result
 
 
@@ -98,6 +100,8 @@ def describe(rows: list[dict], indices: list[int] | None = None) -> str:
     for i in indices if indices is not None else range(len(rows)):
         q = rows[i]
         lines.append(f"{i + 1}. {redact_error_text(q['title'], limit=300)}")
+        if q.get('question'):
+            lines.append('   ' + redact_error_text(q['question'], limit=500))
         for number, option in enumerate(q['options'], 1):
             lines.append(f"   {number}) {redact_error_text(option, limit=80)}")
     body = '\n'.join(lines)

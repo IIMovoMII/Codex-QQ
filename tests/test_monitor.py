@@ -35,6 +35,37 @@ class ControlStatusIndexTests(unittest.TestCase):
                 self.assertNotIn("private test body", encoded)
                 self.assertIn('"running"', encoded)
 
+    def test_session_end_removes_status_and_recent_index_stays_bounded(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            monitor = DesktopMonitor(MonitorConfig(codex_home=root / 'codex', data_dir=root / 'data'))
+            with patch('monitor.MAX_CONTROL_STATUS_ENTRIES', 2):
+                for index in range(3):
+                    monitor._apply([Signal(SignalKind.TURN_STARTED, session_id=f's{index}', turn_id='t')])
+                self.assertLessEqual(len(monitor.control_status), 2)
+                self.assertIn('s2', monitor.control_status)
+                monitor._apply([Signal(SignalKind.SESSION_ENDED, session_id='s2')])
+                self.assertNotIn('s2', monitor.control_status)
+            saved = json.loads((monitor.paths['state'] / 'control-status.json').read_text(encoding='utf-8'))
+            self.assertNotIn('s2', saved['threads'])
+
+    def test_reconciliation_restarts_a_dead_directory_watcher(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            monitor = DesktopMonitor(MonitorConfig(codex_home=root / 'codex', data_dir=root / 'data'))
+            class Watcher:
+                def __init__(self, path, _events, recursive=False):
+                    self.root = path.resolve(); self.alive = False; self.closed = False
+                def start(self): self.alive = True
+                def close(self): self.closed = True; self.alive = False
+            dead = Watcher(monitor.session_root, monitor.events)
+            monitor.watchers = [dead]; monitor._watch_roots = [monitor.session_root]
+            with patch('monitor.WindowsDirectoryWatcher', Watcher):
+                monitor._ensure_watchers()
+            self.assertTrue(dead.closed)
+            self.assertEqual(len(monitor.watchers), 1)
+            self.assertTrue(monitor.watchers[0].alive)
+
 
 def record(payload: dict, *, timestamp: str = "2026-08-23T00:00:00Z") -> str:
     return json.dumps(
@@ -59,6 +90,49 @@ def session_meta(session_id: str, *, source: str = "vscode") -> str:
 
 
 class MonitorRaceTests(unittest.TestCase):
+    def test_reconcile_discovers_recent_new_transcript_without_watcher_event(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session_id = '99999999-9999-9999-9999-999999999999'
+            monitor = DesktopMonitor(MonitorConfig(root / 'codex', root / 'runtime'))
+            transcript = monitor.session_root / f'rollout-{session_id}.jsonl'
+            transcript.parent.mkdir(parents=True)
+            now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+            meta = json.loads(session_meta(session_id))
+            meta['timestamp'] = now
+            completion = record({'type': 'task_complete', 'turn_id': 'recent'}, timestamp=now)
+            transcript.write_text(json.dumps(meta) + '\n' + completion, encoding='utf-8')
+            self.assertFalse(monitor.tailer.is_known(transcript))
+            monitor._reconcile()
+            self.assertTrue(monitor.tailer.is_known(transcript))
+            rows = [json.loads(row) for row in monitor.notifier.log_path.read_text(encoding='utf-8').splitlines()]
+            self.assertEqual([(row['turn_id'], row['state']) for row in rows], [('recent', 'completed')])
+
+    def test_notification_persistence_failure_rolls_back_state_and_replay_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session_id = '99999999-9999-9999-9999-999999999998'
+            monitor = DesktopMonitor(MonitorConfig(root / 'codex', root / 'runtime'))
+            transcript = monitor.session_root / f'rollout-{session_id}.jsonl'
+            transcript.parent.mkdir(parents=True)
+            now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+            meta = json.loads(session_meta(session_id)); meta['timestamp'] = now
+            transcript.write_text(json.dumps(meta) + '\n' + record({'type': 'task_started', 'turn_id': 't'}, timestamp=now)
+                                  + record({'type': 'task_complete', 'turn_id': 't'}, timestamp=now), encoding='utf-8')
+            monitor.tailer.register_from_start(transcript)
+            real_write = __import__('monitor').atomic_write_json
+            def fail_index(path, value):
+                if path.name == 'control-status.json':
+                    raise OSError('temporary status write failure')
+                return real_write(path, value)
+            with patch('monitor.atomic_write_json', side_effect=fail_index):
+                with self.assertRaises(OSError):
+                    monitor._read_transcript(transcript)
+            self.assertFalse(monitor.machine.active_runtimes())
+            monitor._read_transcript(transcript)
+            rows = [json.loads(row) for row in monitor.notifier.log_path.read_text(encoding='utf-8').splitlines()]
+            self.assertEqual([row['state'] for row in rows], ['completed'])
+
     def test_hook_lookback_preserves_later_fast_turns(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -477,6 +551,32 @@ class SpoolRetentionTests(unittest.TestCase):
             rotated = list(monitor.paths["logs"].glob("shadow-notifications-*.jsonl"))
             self.assertEqual(len(rotated), 1)
             self.assertEqual(shadow.stat().st_size, 0)
+
+    def test_spool_archive_lock_keeps_event_retryable_and_does_not_escape(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            monitor = self._monitor(Path(temporary))
+            path = monitor.paths['incoming'] / 'bad.json'
+            path.write_text('{bad json', encoding='utf-8')
+            with patch('monitor.os.replace', side_effect=PermissionError('locked')):
+                monitor._process_spool_file(path)
+                monitor._process_all_spool()
+            self.assertTrue(path.exists())
+            self.assertFalse(list(monitor.paths['failed'].glob('*.json')))
+
+    def test_external_append_logs_are_bounded_without_touching_pending_outbox(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            monitor = self._monitor(Path(temporary))
+            pending = monitor.paths['outbox'] / 'pending' / 'keep.json'
+            pending.write_text('{"keep":true}', encoding='utf-8')
+            logs = [monitor.paths['logs'] / name for name in
+                    ('cc-connect.log', 'monitor-console.log', 'autostart-console.log')]
+            for path in logs:
+                path.write_bytes(b'x' * 300)
+            with patch('monitor.MAX_ACTIVE_LOG_BYTES', 128):
+                for path in logs:
+                    monitor._bound_open_log(path)
+            self.assertTrue(all(path.stat().st_size <= 64 for path in logs))
+            self.assertEqual(pending.read_text(encoding='utf-8'), '{"keep":true}')
 
 
 if __name__ == "__main__":

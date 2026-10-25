@@ -22,6 +22,16 @@ FILE_NOTIFY_CHANGE_LAST_WRITE = 0x00000010
 FILE_NOTIFY_CHANGE_CREATION = 0x00000040
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 ERROR_OPERATION_ABORTED = 995
+ERROR_NOTIFY_ENUM_DIR = 1022
+
+
+def _kernel32():
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CancelIoEx.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    kernel32.CancelIoEx.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32
 
 
 _ACTIONS = {
@@ -51,8 +61,12 @@ class WindowsDirectoryWatcher:
         self._thread: threading.Thread | None = None
         self._closed = threading.Event()
 
+    @property
+    def alive(self) -> bool:
+        return bool(self._thread is not None and self._thread.is_alive() and not self._closed.is_set())
+
     def start(self) -> None:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = _kernel32()
         create_file = kernel32.CreateFileW
         create_file.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE]
         create_file.restype = wintypes.HANDLE
@@ -72,7 +86,7 @@ class WindowsDirectoryWatcher:
         self._thread.start()
 
     def _run(self) -> None:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = _kernel32()
         read_changes = kernel32.ReadDirectoryChangesW
         read_changes.argtypes = [
             wintypes.HANDLE,
@@ -109,6 +123,9 @@ class WindowsDirectoryWatcher:
                 error = ctypes.get_last_error()
                 if self._closed.is_set() or error == ERROR_OPERATION_ABORTED:
                     break
+                if error == ERROR_NOTIFY_ENUM_DIR:
+                    self.output.put(DirectoryChange(self.root, None, "overflow"))
+                    continue
                 self.output.put(DirectoryChange(self.root, None, f"watch_error:{error}"))
                 break
             if returned.value == 0:
@@ -120,7 +137,14 @@ class WindowsDirectoryWatcher:
                 action_number = int.from_bytes(buffer.raw[offset + 4 : offset + 8], "little")
                 name_length = int.from_bytes(buffer.raw[offset + 8 : offset + 12], "little")
                 name_bytes = buffer.raw[offset + 12 : offset + 12 + name_length]
-                relative = name_bytes.decode("utf-16-le", errors="strict")
+                try:
+                    relative = name_bytes.decode("utf-16-le", errors="strict")
+                except UnicodeDecodeError:
+                    self.output.put(DirectoryChange(self.root, None, "overflow"))
+                    if next_offset == 0:
+                        break
+                    offset += next_offset
+                    continue
                 self.output.put(DirectoryChange(self.root, self.root / relative, _ACTIONS.get(action_number, f"action:{action_number}")))
                 if next_offset == 0:
                     break
@@ -131,12 +155,13 @@ class WindowsDirectoryWatcher:
             return
         self._closed.set()
         if self._handle is not None:
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            try:
-                kernel32.CancelIoEx(self._handle, None)
-            finally:
-                kernel32.CloseHandle(self._handle)
+            kernel32 = _kernel32()
+            handle = self._handle
             self._handle = None
+            try:
+                kernel32.CancelIoEx(handle, None)
+            finally:
+                kernel32.CloseHandle(handle)
         if self._thread is not None:
             self._thread.join(timeout=2)
 

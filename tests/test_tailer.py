@@ -60,6 +60,24 @@ class TailerTests(unittest.TestCase):
             signals = tailer.read_new_signals(transcript)
             self.assertEqual([item.turn_id for item in signals], ["current", "current"])
 
+    def test_oversized_jsonl_record_is_skipped_and_following_records_are_read(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            transcript = root / 'rollout-2026-01-01T00-00-00-44444444-4444-4444-4444-444444444444.jsonl'
+            transcript.write_bytes(b'{' + b'x' * 600 + b'}\n' + line({'type': 'task_started', 'turn_id': 'after-large'})
+                                   + line({'type': 'task_complete', 'turn_id': 'after-large'}))
+            tailer = IncrementalTailer(root / 'cursors.json')
+            tailer.register_from_start(transcript)
+            signals = []
+            for _ in range(12):
+                signals.extend(tailer.read_new_signals(transcript, max_bytes=128))
+                if any(signal.kind == SignalKind.TURN_COMPLETED for signal in signals):
+                    break
+            self.assertEqual([signal.kind for signal in signals], [SignalKind.TURN_STARTED, SignalKind.TURN_COMPLETED])
+            cursor = tailer.cursor_for(transcript)
+            self.assertEqual(cursor.offset, transcript.stat().st_size)
+            self.assertFalse(cursor.skipping_oversized_line)
+
     @unittest.skipUnless(os.name == "nt", "Windows path aliases only")
     def test_windows_device_prefix_reuses_and_migrates_the_same_cursor(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

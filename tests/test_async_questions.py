@@ -57,6 +57,18 @@ def native_turn():
 
 
 class ShapeTests(unittest.TestCase):
+    def test_question_field_is_preserved_and_rendered_without_accepting_unknown_fields(self):
+        parsed = parse_call({'call_id': 'call_test', 'arguments': json.dumps({'questions': [
+            {'title': '标题', 'question': '真实题目正文？', 'options': ['甲', '乙']} ]})})
+        self.assertEqual(parsed['questions'][0]['question'], '真实题目正文？')
+        self.assertIn('真实题目正文？', notification(
+            Signal(SignalKind.ASYNC_QUESTION_CREATED, session_id='session',
+                   data={'call_id': 'call_test', **parsed}), turn_id='turn').message)
+        rejected = parse_call({'call_id': 'call_test', 'arguments': json.dumps({'questions': [
+            {'title': '标题', 'question': '正文', 'options': [], 'secret': '不要转发'}]})})
+        self.assertEqual(rejected['questions'], [])
+        self.assertNotIn('不要转发', str(rejected))
+
     def test_pending_native_questions_use_exact_ids_and_partial_native_answers(self):
         turn = native_turn()
         self.assertEqual(pending_batches(turn)[0]['indices'], [0, 1])

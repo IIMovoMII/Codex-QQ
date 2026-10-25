@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import os
 import queue
@@ -10,7 +11,7 @@ import time
 from dataclasses import replace as dataclass_replace
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from hook_bridge import hook_event_to_signals
@@ -43,6 +44,9 @@ MAX_OBSOLETE_OUTBOX_FILES = 500
 ROTATED_LOG_RETENTION = timedelta(days=30)
 MAX_ROTATED_LOG_FILES = 4
 MAX_ACTIVE_LOG_BYTES = 8 * 1024 * 1024
+MAX_CONTROL_STATUS_ENTRIES = 2000
+MAX_RECENT_TRANSCRIPTS = 1000
+MAX_RECENT_SCAN_ENTRIES = 10000
 
 
 @dataclass(frozen=True)
@@ -69,6 +73,7 @@ class DesktopMonitor:
         self.metadata = ThreadMetadataResolver(config.codex_home)
         self.events: queue.Queue[DirectoryChange] = queue.Queue()
         self.watchers: list[WindowsDirectoryWatcher] = []
+        self._watch_roots: list[Path] = []
         self.last_reconciliation = 0.0
         self.last_process_check = 0.0
         self.last_spool_cleanup: float | None = None
@@ -109,38 +114,53 @@ class DesktopMonitor:
             )
 
     def _apply(self, signals: list[Signal], *, cutoff: datetime | None = None) -> None:
+        machine_before = copy.deepcopy(self.machine)
+        status_before = copy.deepcopy(self.control_status)
         changed = False
-        for signal in sorted(signals, key=lambda item: item.observed_at):
-            # Questions are independent notices, not synthetic running turns.
-            # An async question must not create/reset the task's state machine.
-            notes = [] if signal.kind in (SignalKind.ASYNC_QUESTION_CREATED, SignalKind.ASYNC_QUESTION_ANSWERED) else self.machine.apply(signal)
-            if signal.kind == SignalKind.ASYNC_QUESTION_ANSWERED and signal.session_id:
-                self.notifier.resolve_async_answers(signal.session_id, signal.data.get('answers') or [])
-            elif signal.kind == SignalKind.ASYNC_QUESTION_CREATED and signal.observed_at >= self.async_not_before:
-                from async_questions import notification
-                turn = signal.turn_id or self.machine.active_turn_by_session.get(signal.session_id or '') or 'question:' + signal.data.get('call_id', '')
-                context = self.machine.session_context.get(signal.session_id or '', {})
-                note = notification(signal, turn_id=turn, model=context.get('model') or '')
-                if note:
-                    notes.append(note)
-            elif signal.kind in (SignalKind.TURN_COMPLETED, SignalKind.TURN_ABORTED) and signal.session_id and signal.turn_id:
-                self.notifier.close_async_turn(signal.session_id, signal.turn_id)
-            if cutoff is None or signal.observed_at >= cutoff:
-                self._emit(notes)
-            if signal.session_id:
-                tid = self.machine.active_turn_by_session.get(signal.session_id) or signal.turn_id
-                runtime = self.machine.turns.get((signal.session_id, tid))
-                if runtime:
-                    status = {"turn_id": runtime.turn_id, "state": runtime.state.value}
-                    if self.control_status.get(signal.session_id) != status:
-                        self.control_status[signal.session_id] = status
+        try:
+            for signal in sorted(signals, key=lambda item: item.observed_at):
+                # Questions are independent notices, not synthetic running turns.
+                # An async question must not create/reset the task's state machine.
+                notes = [] if signal.kind in (SignalKind.ASYNC_QUESTION_CREATED, SignalKind.ASYNC_QUESTION_ANSWERED) else self.machine.apply(signal)
+                if signal.kind == SignalKind.ASYNC_QUESTION_ANSWERED and signal.session_id:
+                    self.notifier.resolve_async_answers(signal.session_id, signal.data.get('answers') or [])
+                elif signal.kind == SignalKind.ASYNC_QUESTION_CREATED and signal.observed_at >= self.async_not_before:
+                    from async_questions import notification
+                    turn = signal.turn_id or self.machine.active_turn_by_session.get(signal.session_id or '') or 'question:' + signal.data.get('call_id', '')
+                    context = self.machine.session_context.get(signal.session_id or '', {})
+                    note = notification(signal, turn_id=turn, model=context.get('model') or '')
+                    if note:
+                        notes.append(note)
+                elif signal.kind in (SignalKind.TURN_COMPLETED, SignalKind.TURN_ABORTED) and signal.session_id and signal.turn_id:
+                    self.notifier.close_async_turn(signal.session_id, signal.turn_id)
+                if cutoff is None or signal.observed_at >= cutoff:
+                    self._emit(notes)
+                if signal.session_id and signal.kind == SignalKind.SESSION_ENDED:
+                    if self.control_status.pop(signal.session_id, None) is not None:
                         changed = True
-        if changed:
-            # State transitions only; assistant deltas do not rewrite this index.
-            atomic_write_json(self.paths["state"] / "control-status.json", {
-                "monitor_pid": os.getpid(), "monitor_created": self.monitor_created,
-                "threads": self.control_status,
-            })
+                elif signal.session_id:
+                    tid = self.machine.active_turn_by_session.get(signal.session_id) or signal.turn_id
+                    runtime = self.machine.turns.get((signal.session_id, tid))
+                    if runtime:
+                        status = {"turn_id": runtime.turn_id, "state": runtime.state.value}
+                        if self.control_status.get(signal.session_id) != status:
+                            self.control_status.pop(signal.session_id, None)
+                            self.control_status[signal.session_id] = status
+                            while len(self.control_status) > MAX_CONTROL_STATUS_ENTRIES:
+                                self.control_status.pop(next(iter(self.control_status)))
+                            changed = True
+            if changed:
+                # State transitions only; assistant deltas do not rewrite this index.
+                atomic_write_json(self.paths["state"] / "control-status.json", {
+                    "monitor_pid": os.getpid(), "monitor_created": self.monitor_created,
+                    "threads": self.control_status,
+                })
+        except Exception:
+            # Transcript cursors are committed after this method returns. Keep
+            # the in-memory reducer aligned with that durable boundary too.
+            self.machine = machine_before
+            self.control_status = status_before
+            raise
 
     def _read_transcript(
         self,
@@ -161,6 +181,8 @@ class DesktopMonitor:
         target_seen = target_turn_id is None
         hook_terminal_seen = False
         for _ in range(8):
+            machine_before = copy.deepcopy(self.machine)
+            status_before = copy.deepcopy(self.control_status)
             try:
                 cursor = self.tailer.cursor_for(path)
                 before = cursor.offset if cursor is not None else -1
@@ -196,6 +218,8 @@ class DesktopMonitor:
                 self.tailer.commit()
             except Exception:
                 self.tailer.restore_cursor(path, previous_cursor)
+                self.machine = machine_before
+                self.control_status = status_before
                 raise
             hook_terminal_seen |= any(
                 signal.turn_id == hook_turn_id
@@ -242,6 +266,13 @@ class DesktopMonitor:
             event = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(event, dict):
                 raise ValueError("spool event is not an object")
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            self._archive_spool_file(path, self.paths["failed"])
+            return
+        except OSError:
+            return
+
+        try:
             transcript_text = event.get("transcript_path")
             transcript = Path(transcript_text) if isinstance(transcript_text, str) and transcript_text else None
             if transcript is not None:
@@ -263,9 +294,7 @@ class DesktopMonitor:
                     # incoming so reconciliation can retry it shortly.
                     return
                 if not desktop_rollout:
-                    destination = self.paths["processed"] / path.name
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    os.replace(path, destination)
+                    self._archive_spool_file(path, self.paths["processed"])
                     return
             turn_id = str(event.get("turn_id") or "") or None
             hook_signals = hook_event_to_signals(event)
@@ -279,13 +308,35 @@ class DesktopMonitor:
                 hook_signals = [signal for signal in hook_signals
                                 if signal.kind in (SignalKind.SESSION_STARTED, SignalKind.SESSION_ENDED)]
             self._apply(hook_signals)
-            destination = self.paths["processed"] / path.name
-        except Exception:
-            destination = self.paths["failed"] / path.name
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as error:
+            # Keep a failed application retryable. In particular, a transient
+            # outbox or state-file error must not move the only hook event to
+            # failed/ and permanently lose its notification.
+            self._log_monitor_error("spool-process", error)
+            return
+        self._archive_spool_file(path, self.paths["processed"])
+
+    def _archive_spool_file(self, path: Path, destination_root: Path) -> bool:
+        destination = destination_root / path.name
         try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(path, destination)
+            return True
         except FileNotFoundError:
+            return not path.exists()
+        except OSError as error:
+            self._log_monitor_error("spool-archive", error)
+            return False
+
+    def _log_monitor_error(self, stage: str, error: BaseException) -> None:
+        try:
+            from runtime_io import append_json_line
+            append_json_line(self.paths["logs"] / "monitor-errors.jsonl", {
+                "at": datetime.now(timezone.utc).isoformat(),
+                "stage": stage,
+                "error_type": type(error).__name__,
+            })
+        except OSError:
             pass
 
     @staticmethod
@@ -453,8 +504,23 @@ class DesktopMonitor:
             ("obsolete", OBSOLETE_OUTBOX_RETENTION, MAX_OBSOLETE_OUTBOX_FILES),
         ):
             self._prune_spool_directory(outbox / name, retention=retention, max_files=maximum, now=wall_now)
-        for name in ("shadow-notifications.jsonl", "delivery.jsonl"):
+        marker_dir = outbox / 'sent-state'
+        try:
+            marker_entries = sorted(
+                ((marker.stat().st_mtime, marker) for marker in marker_dir.glob('*.json')
+                 if not (outbox / 'pending' / marker.name).exists()),
+                key=lambda pair: pair[0], reverse=True)
+            marker_cutoff = wall_now - SENT_OUTBOX_RETENTION.total_seconds()
+            for modified, marker in marker_entries:
+                if modified < marker_cutoff or marker not in [row[1] for row in marker_entries[:MAX_SENT_OUTBOX_FILES]]:
+                    marker.unlink(missing_ok=True)
+        except OSError:
+            pass
+        for name in ("shadow-notifications.jsonl", "delivery.jsonl", "monitor-errors.jsonl", "tailer-errors.jsonl",
+                     "app.jsonl", "autostart.jsonl"):
             self._rotate_and_prune_log(self.paths["logs"] / name, now=wall_now)
+        for name in ("cc-connect.log", "monitor-console.log", "autostart-console.log"):
+            self._bound_open_log(self.paths["logs"] / name)
         index_path = self.paths["root"] / "spool" / "orphaned.json"
         try:
             if index_path.exists():
@@ -478,12 +544,38 @@ class DesktopMonitor:
             pass
         self.last_spool_cleanup = now_mono
 
+    @staticmethod
+    def _bound_open_log(path: Path) -> None:
+        """Trim an externally opened append log in place when rename is blocked."""
+        try:
+            size = path.stat().st_size
+            if size <= MAX_ACTIVE_LOG_BYTES:
+                return
+            with path.open('r+b') as stream:
+                stream.seek(max(0, size - MAX_ACTIVE_LOG_BYTES // 2))
+                tail = stream.read(MAX_ACTIVE_LOG_BYTES // 2)
+                newline = tail.find(b'\n')
+                if newline >= 0:
+                    tail = tail[newline + 1:]
+                stream.seek(0)
+                stream.write(tail)
+                stream.truncate()
+                stream.flush()
+        except OSError:
+            pass
+
     def _process_all_spool(self) -> None:
         for path in sorted(self.paths["incoming"].glob("*.json")):
-            self._process_spool_file(path)
+            try:
+                self._process_spool_file(path)
+            except Exception as error:
+                self._log_monitor_error("spool-file", error)
 
     def _handle_change(self, change: DirectoryChange) -> None:
         if change.path is None:
+            if change.action.startswith('watch_error'):
+                self._log_monitor_error('watcher', OSError(change.action))
+                self._restart_watcher(change.root)
             self._reconcile()
             return
         path = change.path
@@ -518,6 +610,8 @@ class DesktopMonitor:
         now_mono = time.monotonic()
         self._process_all_spool()
         self._cleanup_spool_retention(now_mono=now_mono)
+        self._discover_recent_transcripts()
+        self._ensure_watchers()
         for path in self.tailer.known_paths():
             try:
                 stat = path.stat()
@@ -527,6 +621,47 @@ class DesktopMonitor:
             if cursor and stat.st_size != cursor.offset:
                 self._read_transcript(path)
         self.last_reconciliation = now_mono
+
+    def _discover_recent_transcripts(self) -> None:
+        """Recover recent files missed by watcher overflow or watcher failure."""
+        cutoff = datetime.now(timezone.utc) - timedelta(
+            seconds=max(2 * self.config.reconciliation_seconds,
+                        self.config.unknown_rollout_grace_seconds)
+        )
+        candidates: list[tuple[float, Path]] = []
+        # Codex layouts use either a flat sessions directory or YYYY/MM/DD.
+        # Scan only the active date window (bounded to eight days) instead of
+        # recursively walking years of history on every reconciliation.
+        days = min(8, max(2, int(self.config.unknown_rollout_grace_seconds // 86400) + 2))
+        directories = {self.session_root}
+        today = date.today()
+        for offset in range(days):
+            day = today - timedelta(days=offset)
+            directories.add(self.session_root / f'{day.year:04d}' / f'{day.month:02d}' / f'{day.day:02d}')
+        for directory in directories:
+            try:
+                for entry_index, path in enumerate(directory.glob('*.jsonl')):
+                    if entry_index >= MAX_RECENT_SCAN_ENTRIES:
+                        break
+                    if self.tailer.is_known(path):
+                        continue
+                    try:
+                        modified = path.stat().st_mtime
+                    except OSError:
+                        continue
+                    if modified >= cutoff.timestamp():
+                        candidates.append((modified, path))
+            except OSError:
+                continue
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        for _, path in candidates[:MAX_RECENT_TRANSCRIPTS]:
+            try:
+                if is_desktop_rollout(path) is not True:
+                    continue
+                self.tailer.register_with_lookback(path)
+                self._read_transcript(path, not_before=cutoff)
+            except (FileNotFoundError, PermissionError, OSError, ValueError):
+                continue
 
     def _active_runtimes(self):
         return self.machine.active_runtimes()
@@ -602,20 +737,54 @@ class DesktopMonitor:
 
     def start(self) -> None:
         self.session_root.mkdir(parents=True, exist_ok=True)
-        self.watchers = [
-            WindowsDirectoryWatcher(self.paths["incoming"], self.events, recursive=False),
-            WindowsDirectoryWatcher(self.session_root, self.events, recursive=True),
-        ]
-        for watcher in self.watchers:
-            watcher.start()
+        self._watch_roots = [self.paths["incoming"], self.session_root]
+        for root in self._watch_roots:
+            self._restart_watcher(root)
         self._process_all_spool()
         self._cleanup_spool_retention()
         self._check_processes()
 
     def close(self) -> None:
         for watcher in self.watchers:
-            watcher.close()
+            try:
+                watcher.close()
+            except OSError as error:
+                self._log_monitor_error('watcher-close', error)
         self.watchers.clear()
+
+    def _restart_watcher(self, root: Path) -> None:
+        retained = []
+        for watcher in self.watchers:
+            if getattr(watcher, 'root', None) == root.resolve():
+                try:
+                    watcher.close()
+                except OSError as error:
+                    self._log_monitor_error('watcher-close', error)
+            else:
+                retained.append(watcher)
+        self.watchers = retained
+        try:
+            watcher = WindowsDirectoryWatcher(root, self.events,
+                                              recursive=root == self.session_root)
+            if not hasattr(watcher, 'root'):
+                watcher.root = root.resolve()
+            watcher.start()
+            self.watchers.append(watcher)
+        except OSError as error:
+            self._log_monitor_error('watcher-start', error)
+
+    def _ensure_watchers(self) -> None:
+        for root in self._watch_roots:
+            active = next((watcher for watcher in self.watchers
+                           if getattr(watcher, 'root', None) == root.resolve()), None)
+            if active is None or not getattr(active, 'alive', True):
+                self._restart_watcher(root)
+
+    def _guard(self, stage: str, callback: Callable[[], Any]) -> None:
+        try:
+            callback()
+        except Exception as error:
+            self._log_monitor_error(stage, error)
 
     def _standby(self) -> bool:
         return bool(self.config.low_power_idle and self.last_process_status is not None
@@ -645,15 +814,15 @@ class DesktopMonitor:
                 if self.exit_requested:
                     break
                 if change is not None:
-                    self._handle_change(change)
+                    self._guard('change', lambda: self._handle_change(change))
                 now = time.monotonic()
                 standby = self._standby()
                 if now - self.last_reconciliation >= (120.0 if standby else self.config.reconciliation_seconds):
-                    self._reconcile()
+                    self._guard('reconcile', self._reconcile)
                 if now - self.last_process_check >= (30.0 if standby else self.config.process_check_seconds):
-                    self._check_processes()
-                self._emit(self.machine.tick())
-                self.notifier.flush(max_items=1)
+                    self._guard('process-check', self._check_processes)
+                self._guard('state-tick', lambda: self._emit(self.machine.tick()))
+                self._guard('notification-flush', lambda: self.notifier.flush(max_items=1))
         finally:
             self.close()
             if self.config.manage_cc_connect:

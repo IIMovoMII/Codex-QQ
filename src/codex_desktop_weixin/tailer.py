@@ -3,13 +3,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Any
 
 from models import Signal, SignalKind
 from rollout import parse_rollout_line
-from runtime_io import atomic_write_json
+from runtime_io import append_json_line, atomic_write_json
 
 
 _SESSION_ID_PATTERN = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=\.jsonl$)", re.IGNORECASE)
@@ -43,6 +44,10 @@ class Cursor:
     identity: int
     session_id: str
     turn_id: str | None = None
+    # The current offset is inside a JSONL record larger than the per-tick
+    # read budget.  Once set, consume chunks until the next newline so one
+    # pathological tool payload cannot wedge the transcript forever.
+    skipping_oversized_line: bool = False
 
 
 class IncrementalTailer:
@@ -67,6 +72,7 @@ class IncrementalTailer:
                     identity=int(value.get("identity", 0)),
                     session_id=str(value.get("session_id") or session_id_from_path(Path(path))),
                     turn_id=value.get('turn_id') if isinstance(value.get('turn_id'), str) else None,
+                    skipping_oversized_line=bool(value.get('skipping_oversized_line', False)),
                 )
                 key = canonical_path_key(path)
                 existing = self.cursors.get(key)
@@ -80,6 +86,13 @@ class IncrementalTailer:
 
     def _save(self) -> None:
         atomic_write_json(self.state_path, {path: asdict(cursor) for path, cursor in self.cursors.items()})
+
+    def _log_oversized_record(self) -> None:
+        try:
+            append_json_line(self.state_path.parent.parent / 'logs' / 'tailer-errors.jsonl',
+                             {'event': 'oversized-jsonl-record-skipped', 'at': time.time()})
+        except OSError:
+            pass
 
     def commit(self) -> None:
         """Persist the in-memory cursor after its signals were applied.
@@ -174,6 +187,7 @@ class IncrementalTailer:
             cursor.identity = identity
             cursor.session_id = session_id_from_path(resolved)
             cursor.turn_id = None
+            cursor.skipping_oversized_line = False
             if persist:
                 self._save()
             return []
@@ -184,8 +198,27 @@ class IncrementalTailer:
             raw = stream.read(max_bytes)
         if not raw:
             return []
+        if cursor.skipping_oversized_line:
+            newline = raw.find(b"\n")
+            if newline < 0:
+                cursor.offset += len(raw)
+                if persist:
+                    self._save()
+                return []
+            cursor.offset += newline + 1
+            cursor.skipping_oversized_line = False
+            if persist:
+                self._save()
+            # The next bounded monitor iteration reads the following records.
+            return []
         last_newline = raw.rfind(b"\n")
         if last_newline < 0:
+            if len(raw) >= max_bytes:
+                self._log_oversized_record()
+                cursor.offset += len(raw)
+                cursor.skipping_oversized_line = True
+                if persist:
+                    self._save()
             return []
         complete = raw[: last_newline + 1]
         consumed = 0

@@ -31,17 +31,25 @@ class DeliverySettings:
     def load(cls, path: Path) -> "DeliverySettings":
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except FileNotFoundError:
             return cls()
+        except (json.JSONDecodeError, OSError, UnicodeDecodeError) as error:
+            raise ValueError("Invalid notification settings") from error
         if not isinstance(value, dict):
-            return cls()
-        mode = str(value.get("mode") or "shadow").strip().lower()
+            raise ValueError("Invalid notification settings")
+        mode_value = value.get("mode", "shadow")
+        if not isinstance(mode_value, str) or not mode_value.strip():
+            raise ValueError("Invalid notification settings mode")
+        mode = mode_value.strip().lower()
         if mode not in ("shadow", "cc-connect"):
-            mode = "shadow"
-        try:
-            timeout = min(60, max(3, int(value.get("timeout_seconds", 15))))
-        except (TypeError, ValueError):
-            timeout = 15
+            raise ValueError("Invalid notification settings mode")
+        timeout_value = value.get("timeout_seconds", 15)
+        if isinstance(timeout_value, bool) or not isinstance(timeout_value, int):
+            raise ValueError("Invalid notification settings timeout")
+        timeout = min(60, max(3, timeout_value))
+        string_fields = ('executable', 'project', 'session', 'data_dir', 'config_path')
+        if any(field in value and not isinstance(value[field], str) for field in string_fields):
+            raise ValueError("Invalid notification settings field")
         return cls(
             mode=mode,
             executable=str(value.get("executable") or "cc-connect"),
@@ -180,8 +188,9 @@ class NotificationDispatcher:
         self.logs = data_dir / "logs"
         self.pending = data_dir / "outbox" / "pending"
         self.sent = data_dir / "outbox" / "sent"
+        self.sent_state = data_dir / "outbox" / "sent-state"
         self.failed = data_dir / "outbox" / "failed"
-        for path in (self.logs, self.pending, self.sent, self.failed):
+        for path in (self.logs, self.pending, self.sent, self.sent_state, self.failed):
             path.mkdir(parents=True, exist_ok=True)
         self.settings_path = data_dir / "settings.json"
         self.settings = DeliverySettings.load(self.settings_path)
@@ -190,6 +199,36 @@ class NotificationDispatcher:
         self.sender = sender or CCConnectSender(self.settings)
         self._last_local_recovery: float | None = None
         self._local_recovery_cooldown = 60.0
+        self._shadow_keys: set[str] = set()
+        self._logged_successes: set[str] = set()
+        self._sent_in_process: set[str] = set()
+        # A transcript replay after a failed cursor commit must not append the
+        # same shadow journal row twice. The active journal and its bounded
+        # archives are small enough to rebuild this idempotency set at startup.
+        for path in sorted(self.logs.glob("shadow-notifications*.jsonl")):
+            try:
+                with path.open("r", encoding="utf-8") as stream:
+                    for line in stream:
+                        try:
+                            row = json.loads(line)
+                            key = row.get("dedupe_key") if isinstance(row, dict) else None
+                            if isinstance(key, str) and key:
+                                self._shadow_keys.add(key)
+                        except (json.JSONDecodeError, UnicodeError):
+                            continue
+            except OSError:
+                continue
+        try:
+            with self.delivery_log.open('r', encoding='utf-8') as stream:
+                for line in stream:
+                    try:
+                        row = json.loads(line)
+                        if isinstance(row, dict) and row.get('success') is True and isinstance(row.get('item'), str):
+                            self._logged_successes.add(row['item'])
+                    except (json.JSONDecodeError, UnicodeError):
+                        continue
+        except OSError:
+            pass
 
     @property
     def log_path(self) -> Path:
@@ -208,22 +247,24 @@ class NotificationDispatcher:
     def emit(self, notification: Notification) -> None:
         if notification.state == TurnState.CRASHED:
             return  # Obsolete process-exit inference is never sent or requeued.
-        self.shadow.emit(notification)
-        if self.settings.mode != "cc-connect":
-            return
         name = self._item_name(notification)
-        if ((self.sent / name).exists() or (self.pending / name).exists()
-                or notification.state == TurnState.QUESTION_AVAILABLE and (self.data_dir / 'outbox' / 'obsolete' / name).exists()):
-            return
-        atomic_write_json(
-            self.pending / name,
-            {
+        if self.settings.mode == "cc-connect":
+            if ((self.sent / name).exists() or (self.pending / name).exists()
+                    or (self.sent_state / name).exists()
+                    or notification.state == TurnState.QUESTION_AVAILABLE and (self.data_dir / 'outbox' / 'obsolete' / name).exists()):
+                return
+            # The outbox is authoritative. If this atomic write fails, the
+            # monitor can roll back its reducer and replay the source record.
+            atomic_write_json(self.pending / name, {
                 "notification": notification.to_dict(),
                 "message": format_notification(notification),
                 "attempts": 0,
                 "next_attempt_at": notification.created_at.isoformat(),
-            },
-        )
+            })
+        key = notification.dedupe_key or name
+        if key not in self._shadow_keys:
+            self.shadow.emit(notification)
+            self._shadow_keys.add(key)
 
     def resolve_async_answers(self, session_id: str, answers: list[dict]) -> int:
         """Retire only this batch's unsent notice once ALL its questions were answered.
@@ -311,14 +352,32 @@ class NotificationDispatcher:
         delivered = 0
         attempted = 0
         now = datetime.now(timezone.utc)
-        for path in sorted(self.pending.glob("*.json")):
+        pending_rows = []
+        for path in self.pending.glob("*.json"):
+            try:
+                item = json.loads(path.read_text(encoding="utf-8"))
+                note = item.get("notification") if isinstance(item, dict) else None
+                created = datetime.fromisoformat(str(note.get("created_at")).replace("Z", "+00:00")) if isinstance(note, dict) else datetime.fromtimestamp(path.stat().st_mtime, timezone.utc)
+                due = datetime.fromisoformat(str(item.get("next_attempt_at")).replace("Z", "+00:00"))
+                pending_rows.append((created.astimezone(timezone.utc), due.astimezone(timezone.utc), path, item))
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                pending_rows.append((datetime.max.replace(tzinfo=timezone.utc), datetime.min.replace(tzinfo=timezone.utc), path, None))
+        pending_rows.sort(key=lambda row: (row[0], row[1], row[2].name))
+        for _created, _due, path, loaded_item in pending_rows:
             if attempted >= max_items:
                 break
             try:
+                if (path.name in self._sent_in_process or path.name in self._logged_successes
+                        or (self.sent_state / path.name).exists()):
+                    self._archive_sent(path)
+                    continue
                 if (self.data_dir / 'outbox' / 'obsolete' / path.name).exists():
                     path.unlink(missing_ok=True)
                     continue
-                item = json.loads(path.read_text(encoding="utf-8"))
+                item = loaded_item if loaded_item is not None else json.loads(path.read_text(encoding="utf-8"))
+                if item.get('delivery_state') == 'sent':
+                    self._archive_sent(path)
+                    continue
                 note = item.get('notification') or {}
                 if isinstance(note, dict) and note.get('state') == TurnState.CRASHED.value:
                     self._retire_async_notice(path, note, 'process-exit-notifications-disabled')
@@ -364,18 +423,35 @@ class NotificationDispatcher:
                     pass
                 attempted += 1
                 continue
-            append_json_line(
-                self.delivery_log,
-                {
-                    "at": now.isoformat(),
-                    "item": path.name,
-                    "success": success,
-                    "attempt": attempts,
-                    "detail": detail,
-                },
-            )
+            try:
+                append_json_line(
+                    self.delivery_log,
+                    {"at": now.isoformat(), "item": path.name, "success": success,
+                     "attempt": attempts, "detail": detail},
+                )
+                if success:
+                    self._logged_successes.add(path.name)
+            except OSError:
+                # The pending record below still gets a durable sent marker.
+                pass
             if success:
-                os.replace(path, self.sent / path.name)
+                self._sent_in_process.add(path.name)
+                # Persist the external success before archive movement. If a
+                # Windows scanner holds the file, the next process only retries
+                # the rename and never sends the notification again.
+                item['delivery_state'] = 'sent'
+                item['sent_at'] = now.isoformat()
+                try:
+                    atomic_write_json(path, item)
+                    atomic_write_json(self.sent_state / path.name,
+                                      {'item': path.name, 'sent_at': now.isoformat()})
+                except OSError:
+                    # Keep the in-process tombstone; on restart the delivery
+                    # log is the durable source if its append succeeded.
+                    self._logged_successes.add(path.name)
+                    delivered += 1
+                    continue
+                self._archive_sent(path)
                 delivered += 1
                 continue
             delay = min(300, 5 * (2 ** min(attempts - 1, 6)))
@@ -384,6 +460,15 @@ class NotificationDispatcher:
             item["last_error"] = detail
             atomic_write_json(path, item)
         return delivered
+
+    def _archive_sent(self, path: Path) -> bool:
+        try:
+            os.replace(path, self.sent / path.name)
+            return True
+        except FileNotFoundError:
+            return not path.exists()
+        except OSError:
+            return False
 
 
 def save_delivery_settings(path: Path, settings: DeliverySettings) -> None:

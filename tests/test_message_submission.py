@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import copy
+import os
 import sys
+import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -199,6 +203,31 @@ class MessageSubmissionTests(unittest.TestCase):
         request = next(message for message in pipe.writes if message.get('method') == QUEUED_FOLLOWUPS_METHOD)
         self.assertEqual([row['id'] for row in request['params']['state'][THREAD]], ['existing', CLIENT])
         self.queue.assert_not_called()
+
+    def test_independent_acp_backends_share_one_visible_queue_writer_lock(self):
+        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {
+                'CC_DATA_DIR': temporary, 'LOCALAPPDATA': temporary}):
+            backends = [NativeBackend(), NativeBackend()]
+            active = 0; maximum = 0; guard = threading.Lock()
+            def write(_thread, text, _connection, operation):
+                nonlocal active, maximum
+                with guard:
+                    active += 1; maximum = max(maximum, active)
+                time.sleep(0.05)
+                with guard:
+                    active -= 1
+                return {'state': 'confirmed', 'text': text, 'operation': operation}
+            for backend in backends:
+                backend._enqueue_native_follow_up_locked = write
+            outputs = []
+            threads = [threading.Thread(target=lambda i=i: outputs.append(
+                backends[i].enqueue_native_follow_up(THREAD, f'message-{i}', 'connection', f'op-{i}')))
+                for i in range(2)]
+            for thread in threads: thread.start()
+            for thread in threads: thread.join(timeout=3)
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(len(outputs), 2)
+            self.assertEqual(maximum, 1)
 
 
 if __name__ == '__main__':

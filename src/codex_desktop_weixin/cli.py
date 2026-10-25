@@ -113,7 +113,13 @@ def command_install_hooks(codex_home: Path, data_dir: Path) -> int:
 
 def command_doctor(codex_home: Path, data_dir: Path) -> int:
     status = hook_install_status(codex_home)
-    delivery = DeliverySettings.load(data_dir / "settings.json")
+    try:
+        delivery = DeliverySettings.load(data_dir / "settings.json")
+    except ValueError as error:
+        status.update({"data_dir": str(data_dir), "delivery_mode": "invalid",
+                       "delivery_error": type(error).__name__, "healthy": False})
+        print(json.dumps(status, ensure_ascii=False, indent=2))
+        return 1
     processes = get_codex_desktop_process_status()
     api_status = cc_connect_api_status(data_dir) if delivery.mode == "cc-connect" else "not_used"
     status.update(

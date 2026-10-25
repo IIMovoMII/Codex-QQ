@@ -20,6 +20,7 @@ from launcher import (
     cleanup_stale_cc_connect_socket,
     _capture_process_identity,
     read_monitor_pid,
+    clear_monitor_pid,
     read_cc_connect_pid,
     write_monitor_pid,
     wait_for_codex_desktop,
@@ -248,6 +249,24 @@ class CCConnectLifecycleTests(unittest.TestCase):
             state_path.parent.mkdir(parents=True)
             state_path.write_text(json.dumps({"pid": os.getpid(), "ready": True}), encoding="utf-8")
             self.assertIsNone(read_monitor_pid(root, require_ready=True))
+
+    def test_non_object_monitor_state_is_preserved_and_treated_as_unavailable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_path = root / 'state' / 'monitor.json'; state_path.parent.mkdir(parents=True)
+            state_path.write_text('[]', encoding='utf-8')
+            self.assertIsNone(read_monitor_pid(root))
+            launcher.clear_monitor_pid(root)
+            self.assertEqual(state_path.read_text(encoding='utf-8'), '[]')
+
+    def test_non_object_monitor_state_is_preserved_and_treated_as_unavailable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state_path = root / 'state' / 'monitor.json'; state_path.parent.mkdir(parents=True)
+            state_path.write_text('[]', encoding='utf-8')
+            self.assertIsNone(read_monitor_pid(root))
+            clear_monitor_pid(root)
+            self.assertEqual(state_path.read_text(encoding='utf-8'), '[]')
 
     def test_pid_reuse_does_not_count_as_managed_cc_connect(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

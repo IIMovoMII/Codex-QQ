@@ -28,6 +28,17 @@ UNKNOWN = "指令已发出，但没有收到确认，可能已经执行。不会
 NEEDS_QUOTE = "这条消息没有引用目标对话，未执行。请引用选定对话的回执或任务提醒，再发送指令；也可先发送“对话”查看列表。"
 
 
+class _UnavailableControlStore:
+    """Fail-closed adapter used when the local schema cannot be opened."""
+    def prune(self) -> None:
+        return
+
+    def __getattr__(self, _name: str) -> Any:
+        def unavailable(*_args: Any, **_kwargs: Any) -> Any:
+            raise OSError('control-state-unavailable')
+        return unavailable
+
+
 class ControlRouter:
     def __init__(self, store: ControlStore, catalog: Any, backend: Any,
                  queue_func: Callable[[str, str], tuple[bool, str]],
@@ -36,7 +47,12 @@ class ControlRouter:
         self.queue_func = queue_func
         self.availability_check = availability_check
         self._bridge_scopes: set[str] = set()
-        self.store.prune()
+        self.state_unavailable = isinstance(store, _UnavailableControlStore)
+        try:
+            self.store.prune()
+        except (OSError, sqlite3.Error, ValueError, TypeError):
+            self.store = _UnavailableControlStore()
+            self.state_unavailable = True
 
     @classmethod
     def runtime(cls, queue_func: Callable[[str, str], tuple[bool, str]]) -> ControlRouter:
@@ -50,10 +66,19 @@ class ControlRouter:
             mode = runtime_mode(root)
             return mode == 'desktop' or mode == 'independent' and read_monitor_pid(root, require_ready=True) is not None
         catalog = LocalCatalog(codex)
-        return cls(ControlStore(data / "control-state.sqlite", legacy_routes=data / "qq-desktop-routes.json"),
-                   catalog, NativeBackend(catalog=catalog), queue_func, availability_check=available)
+        try:
+            store: Any = ControlStore(data / "control-state.sqlite", legacy_routes=data / "qq-desktop-routes.json")
+            check = available
+        except (OSError, ValueError, sqlite3.Error, json.JSONDecodeError, TypeError):
+            # Keep the ACP process alive and return a visible fail-closed reply;
+            # never replace a corrupt state file or silently rebuild routes.
+            store = _UnavailableControlStore()
+            check = lambda: False
+        return cls(store, catalog, NativeBackend(catalog=catalog), queue_func, availability_check=check)
 
     def handle(self, params: Any) -> str:
+        if self.state_unavailable:
+            return '本机 QQ 控制状态无法安全读取，未执行任何操作；原有状态文件已保留。请检查状态数据库或迁移文件后重试。'
         if self.availability_check is not None:
             try:
                 if not self.availability_check():
@@ -148,6 +173,10 @@ class ControlRouter:
         return reply
 
     def _card(self, scope: str, kind: str, data: Any, body: str, *, ttl: float | None = None) -> str:
+        if kind == 'thread' and isinstance(data, dict) and isinstance(data.get('thread_id'), str):
+            # Thread cards are durable navigation handles. The actual action
+            # always probes the current Desktop generation before dispatch.
+            data = {'thread_id': data['thread_id']}
         token = self.store.reference(scope, kind, data, ttl=ttl)
         footer = ""
         if kind == "thread":
@@ -453,7 +482,7 @@ class ControlRouter:
                         "引用本条回复“队列”可查看；回复“删除”移除它，“引导”先移除再把原文交给当前任务。\n"
                         "不会把消息放入看不见的后台队列，也不会自动改成引导。")
                 return self._card(scope, 'queued', {'thread_id': thread_id, 'entry': entry,
-                                                    'connection': meta['_desktop_identity']}, body, ttl=None), 'confirmed'
+                                                    'connection': meta['_desktop_identity']}, body, ttl=30 * 86400), 'confirmed'
             from submission_receipts import queue_ack, digest, status_text
             queue_id = queue_ack(result['detail'], thread_id)
             if queue_id:
@@ -465,7 +494,7 @@ class ControlRouter:
                 body = f"{self.catalog.label(row)}\n已提交给 Codex。{status_text(observed)}"
                 body += '\n\n引用本条回复“状态”查看这一条；回复“删除”仅移除仍在排队的本条消息。'
                 body += '\n此发送回执不支持直接转引导；引用“对话”返回的回执发“队列”，可查看并操作仍可核实的原生队列项。'
-                return self._card(scope, 'submission', receipt, body, ttl=None), 'confirmed'
+                return self._card(scope, 'submission', receipt, body, ttl=30 * 86400), 'confirmed'
             return self._card(scope, 'thread', {'thread_id': thread_id, 'connection': meta['_desktop_identity']},
                               f"{self.catalog.label(row)}\n已提交给 Codex，但原生回执没有可核实的消息编号，执行状态未确认；不能据此认定已开始。\n完成或出错后会继续提醒。引用本条发送“队列”可查看当前可见的本地记录；不会重发。"), "confirmed"
         return UNKNOWN, 'unknown'

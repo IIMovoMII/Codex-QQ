@@ -26,6 +26,7 @@ class TurnRuntime:
     errors: list[tuple[datetime, ErrorSummary]] = field(default_factory=list)
     terminal: bool = False
     notified_states: set[TurnState] = field(default_factory=set)
+    notification_epochs: dict[TurnState, int] = field(default_factory=dict)
     stop_observed_at: datetime | None = None
     project_name: str = ""
     model: str = ""
@@ -148,6 +149,23 @@ class StateMachine:
         if runtime is None and key in self._retired_keys:
             return None
         if runtime is None and create:
+            # Records can arrive without TURN_STARTED. Keep the one-active-turn
+            # invariant here too, and never let an older signal resurrect a
+            # turn after a newer one has become active.
+            for prior_turn in tuple(self.active_turns_by_session.get(key[0], set())):
+                prior_runtime = self.turns.get((key[0], prior_turn))
+                if prior_runtime is None or prior_runtime.terminal:
+                    continue
+                # A late terminal record may complete an unknown old turn,
+                # but must not manufacture a second active turn. Non-terminal
+                # records with the same timestamp can still be the first
+                # observable record for a new turn (the native stream often
+                # batches timestamps at millisecond resolution), so retire
+                # the old runtime in that case.
+                if signal.kind not in (SignalKind.TURN_COMPLETED, SignalKind.TURN_ABORTED) and signal.observed_at <= prior_runtime.started_at:
+                    return None
+                if signal.kind not in (SignalKind.TURN_COMPLETED, SignalKind.TURN_ABORTED):
+                    self._retire_without_notification(prior_runtime)
             context = self.session_context.get(key[0], {})
             runtime = TurnRuntime(
                 session_id=key[0],
@@ -157,7 +175,9 @@ class StateMachine:
                 model=context.get("model", ""),
             )
             self.turns[key] = runtime
-            self._mark_active(runtime)
+            if signal.kind not in (SignalKind.TURN_COMPLETED, SignalKind.TURN_ABORTED):
+                self.active_turn_by_session[key[0]] = key[1]
+                self._mark_active(runtime)
         if runtime is not None:
             self._update_context(runtime, signal)
         return runtime
@@ -171,12 +191,21 @@ class StateMachine:
         title: str,
         message: str,
         error: ErrorSummary | None = None,
+        event_at: datetime | None = None,
         allow_repeat: bool = False,
     ) -> Notification | None:
         if not allow_repeat and state in runtime.notified_states:
             return None
         runtime.notified_states.add(state)
         runtime.state = state
+        epoch = runtime.notification_epochs.get(state, 0)
+        dedupe_key = f"{runtime.session_id}:{runtime.turn_id}:{state.value}"
+        if state in (TurnState.WAITING_APPROVAL, TurnState.WAITING_INPUT):
+            # Event time survives a monitor restart and keeps replayed hook
+            # records idempotent. Fall back to an in-memory epoch only for
+            # synthetic signals that have no event timestamp.
+            marker = event_at.isoformat() if event_at is not None else str(epoch)
+            dedupe_key += f":{marker}"
         return Notification(
             session_id=runtime.session_id,
             turn_id=runtime.turn_id,
@@ -187,7 +216,7 @@ class StateMachine:
             project_name=runtime.project_name,
             model=runtime.model,
             error=error,
-            dedupe_key=f"{runtime.session_id}:{runtime.turn_id}:{state.value}",
+            dedupe_key=dedupe_key,
         )
 
     def apply(self, signal: Signal) -> list[Notification]:
@@ -268,6 +297,9 @@ class StateMachine:
         ):
             # Activity after Stop means this turn continued (for example because
             # another concurrent Stop hook requested more work).
+            for waiting_state in (TurnState.WAITING_INPUT, TurnState.WAITING_APPROVAL):
+                if waiting_state in runtime.notified_states:
+                    runtime.notification_epochs[waiting_state] = runtime.notification_epochs.get(waiting_state, 0) + 1
             runtime.stop_observed_at = None
             self.pending_stop_keys.discard((runtime.session_id, runtime.turn_id))
             runtime.notified_states.discard(TurnState.WAITING_INPUT)
@@ -302,6 +334,7 @@ class StateMachine:
                 confidence=Confidence.CERTAIN,
                 title="Codex 正在等待授权",
                 message="任务需要你回到电脑确认权限后才能继续。",
+                event_at=signal.observed_at,
             )
             return [note] if note else []
 
@@ -314,6 +347,7 @@ class StateMachine:
                 confidence=Confidence.HIGH,
                 title="Codex 正在等待输入",
                 message="任务向你提出了问题，需要你回复后才能继续。",
+                event_at=signal.observed_at,
             )
             return [note] if note else []
 

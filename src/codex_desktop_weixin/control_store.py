@@ -17,6 +17,16 @@ class ControlStore:
     def __init__(self, path: Path, *, legacy_routes: Path | None = None) -> None:
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_value = None
+        if legacy_routes is not None and legacy_routes.exists():
+            try:
+                legacy_value = json.loads(legacy_routes.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+                raise ValueError("Invalid legacy routes; preserved without migration") from error
+            if not isinstance(legacy_value, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in legacy_value.items()
+            ):
+                raise ValueError("Invalid legacy routes; preserved without migration")
         with self.connect() as db:
             version = db.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, 1, self.VERSION):
@@ -48,12 +58,7 @@ class ControlStore:
                 "SELECT 1 FROM meta WHERE key='legacy_import'"
             ).fetchone():
                 if legacy_routes.exists():
-                    routes = json.loads(legacy_routes.read_text(encoding="utf-8"))
-                    if not isinstance(routes, dict) or not all(
-                        isinstance(k, str) and isinstance(v, str) for k, v in routes.items()
-                    ):
-                        raise ValueError("Invalid legacy routes; preserved without migration")
-                    db.executemany("INSERT OR IGNORE INTO legacy_selections VALUES(?,?)", routes.items())
+                    db.executemany("INSERT OR IGNORE INTO legacy_selections VALUES(?,?)", legacy_value.items())
                 db.execute("INSERT INTO meta VALUES('legacy_import','1')")
 
     def begin_bridge_session(self, scope: str, *, now: float | None = None) -> float:
@@ -104,11 +109,21 @@ class ControlStore:
                 db.execute("INSERT INTO selections VALUES(?,?) ON CONFLICT(scope) DO UPDATE SET thread_id=excluded.thread_id", (scope, thread_id))
 
     def reference(self, scope: str, kind: str, data: Any, *, ttl: float | None = None) -> str:
-        token = secrets.token_urlsafe(9)
+        encoded = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
         now = time.time()
         with self.connect() as db:
+            # Reuse permanent cards with identical targets (notably thread
+            # receipts). Refreshing the same thread no longer grows refs forever.
+            if ttl is None:
+                old = db.execute(
+                    "SELECT id FROM refs WHERE scope=? AND kind=? AND data=? AND expires IS NULL ORDER BY created DESC LIMIT 1",
+                    (scope, kind, encoded),
+                ).fetchone()
+                if old is not None:
+                    return str(old[0])
+            token = secrets.token_urlsafe(9)
             db.execute("INSERT INTO refs VALUES(?,?,?,?,?,?)", (
-                token, scope, kind, json.dumps(data, ensure_ascii=False, separators=(",", ":")),
+                token, scope, kind, encoded,
                 now, now + ttl if ttl is not None else None,
             ))
         return token
@@ -146,8 +161,13 @@ class ControlStore:
             bridge_row = db.execute("SELECT started FROM bridge_sessions WHERE scope=?",
                                     (scope,)).fetchone() if scope else None
             bridge_cutoff = float(bridge_row[0]) if bridge_row else 0.0
-            if old is not None and old["identity"] == identity and not old["online"] and online:
-                since = max(time.time(), bridge_cutoff, old["ready_since"])
+            if old is not None and not old["online"] and online:
+                # offline() records the last confirmed disconnect. Using the
+                # current message handling time here would always invalidate
+                # the first fresh message after recovery.
+                since = max(bridge_cutoff, old["ready_since"])
+                if old['identity'] and old['identity'] != identity:
+                    since = max(since, now)
             elif old is None or old["identity"] != identity:
                 since = max(now, bridge_cutoff)
             else:
@@ -156,14 +176,28 @@ class ControlStore:
         return since
 
     def offline(self, scope: str | None = None) -> None:
+        now = time.time()
         with self.connect() as db:
-            db.execute("UPDATE connection SET online=0 WHERE key=?", (self._connection_key(scope),))
+            db.execute("INSERT INTO connection(key,identity,ready_since,online) VALUES(?, '', ?, 0) "
+                       "ON CONFLICT(key) DO UPDATE SET online=0,ready_since=MAX(connection.ready_since,excluded.ready_since)",
+                       (self._connection_key(scope), now))
 
     def prune(self) -> None:
         cutoff = time.time() - 30 * 86400
         with self.connect() as db:
+            # Permanent thread cards are reusable and stable. Other old
+            # references become finite-lived, including cards created by
+            # earlier versions with expires=NULL.
+            db.execute("UPDATE refs SET expires=created+? WHERE expires IS NULL AND kind!='thread'",
+                       (30 * 86400,))
+            db.execute("UPDATE refs SET expires=created+? WHERE expires IS NULL AND kind='thread' AND data LIKE '%\"connection\"%'",
+                       (30 * 86400,))
             db.execute("DELETE FROM refs WHERE expires IS NOT NULL AND expires<?", (time.time(),))
+            db.execute("UPDATE receipts SET state='unknown',reply='处理结果未知，不会自动重发。请在电脑核对。',updated=? WHERE state='dispatching' AND updated<?",
+                       (time.time(), cutoff))
             db.execute("DELETE FROM receipts WHERE updated<? AND state!='dispatching'", (cutoff,))
+            db.execute("UPDATE operations SET state='unknown',reply='操作结果未知，不会自动重发。请在电脑核对。',updated=? WHERE state='dispatching' AND updated<?",
+                       (time.time(), cutoff))
             db.execute("DELETE FROM operations WHERE updated<?", (cutoff,))
             db.execute("DELETE FROM bridge_sessions WHERE started<?", (cutoff,))
 
@@ -190,3 +224,9 @@ class ControlStore:
         with self.connect() as db:
             db.execute('UPDATE operations SET state=?,reply=?,updated=? WHERE scope=? AND key=?',
                        (state, reply[:2200], time.time(), scope, key))
+
+    def release_operation(self, scope: str, key: str) -> None:
+        """Release only a pre-dispatch claim that is known safe to retry."""
+        with self.connect() as db:
+            db.execute("DELETE FROM operations WHERE scope=? AND key=? AND state='dispatching'",
+                       (scope, key))

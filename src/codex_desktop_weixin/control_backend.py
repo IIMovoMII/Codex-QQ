@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import re
 import sqlite3
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Any
 
 from desktop_control import (DesktopClient, DesktopControlError, QUEUED_FOLLOWUPS_METHOD,
@@ -123,9 +126,12 @@ class NativeBackend:
         root = default_data_dir()
         try:
             value = json.loads((root / "state" / "control-status.json").read_text(encoding="utf-8"))
+            if not isinstance(value, dict) or not isinstance(value.get('threads', {}), dict):
+                return "状态暂不可用，请查看电脑"
             pid = read_monitor_pid(root, require_ready=True)
             if pid and value.get("monitor_pid") == pid and value.get("monitor_created") == _query_process_identity(pid).get("process_start_time"):
-                state = (value.get("threads", {}).get(thread_id) or {}).get("state")
+                row = value.get("threads", {}).get(thread_id)
+                state = row.get('state') if isinstance(row, dict) else None
                 label = {"running": "运行中", "waiting_approval": "等待审批", "waiting_input": "等待回答", "completed": "空闲（已完成）", "failed": "出错", "interrupted": "已暂停", "disconnected": "未连接（任务结果未知）", "crashed": "异常停止", "idle": "空闲"}.get(state)
                 if label:
                     return label
@@ -252,6 +258,32 @@ class NativeBackend:
 
     def enqueue_native_follow_up(self, thread_id: str, text: str, connection: str,
                                  operation_id: str) -> dict:
+        lock = self._queue_locks.setdefault(thread_id, threading.Lock())
+        with lock:
+            from runtime_io import acquire_file_lock
+            lock_name = hashlib.sha256(thread_id.encode('utf-8')).hexdigest()[:32]
+            local_app_data = os.environ.get('LOCALAPPDATA')
+            default_control_root = (Path(local_app_data) / 'CodexCC' if local_app_data else
+                                    Path.home() / 'AppData' / 'Local' / 'CodexCC')
+            control_root = Path(os.environ.get('CC_DATA_DIR') or default_control_root)
+            lock_path = control_root / 'state' / f'visible-queue-{lock_name}.lock'
+            deadline = time.monotonic() + 2.0
+            try:
+                process_lock = acquire_file_lock(lock_path)
+                while process_lock is None and time.monotonic() < deadline:
+                    time.sleep(0.025)
+                    process_lock = acquire_file_lock(lock_path)
+            except OSError:
+                process_lock = None
+            if process_lock is None:
+                return {'state': 'rejected', 'reply': '另一个控制请求正在更新 Desktop 可见队列，这条消息未发送、未排队；请重新查看队列后再发。'}
+            try:
+                return self._enqueue_native_follow_up_locked(thread_id, text, connection, operation_id)
+            finally:
+                os.close(process_lock[0])
+
+    def _enqueue_native_follow_up_locked(self, thread_id: str, text: str, connection: str,
+                                         operation_id: str) -> dict:
         """Append one message to Desktop's visible native follow-up queue.
 
         The Desktop IPC accepts a whole snapshot, not an atomic append. Read the
@@ -262,63 +294,90 @@ class NativeBackend:
         catalog = self.catalog
         if catalog is None or not hasattr(catalog, 'saved_queue_rows'):
             return {'state': 'rejected', 'reply': '当前无法读取 Desktop 可见待发送列表，未发送、未排队。请在电脑查看。'}
-        lock = self._queue_locks.setdefault(thread_id, threading.Lock())
-        with lock:
-            try:
-                current = self.snapshot(thread_id, expected_connection=connection)
-                if self._message_route(current) != 'queued':
-                    return {'state': 'rejected', 'reply': '对话状态已变化，这条消息未发送、未排队；请重新查询后发送。'}
-                identity, _ = self.probe()
-                if identity != connection or current.get('owner_id') is None:
-                    return {'state': 'rejected', 'reply': 'Codex 连接或对话所有者已变化，这条消息未发送、未排队。'}
-                rows = catalog.saved_queue_rows(thread_id)
-                if any(row.get('id') == operation_id for row in rows):
-                    return {'state': 'rejected', 'reply': '这条消息编号已存在，未重复加入队列。'}
-                if len(rows) >= 200:
-                    return {'state': 'rejected', 'reply': 'Desktop 可见待发送列表已达到上限，这条消息未发送、未排队。'}
-                # The native operation replaces the whole snapshot.  Take a
-                # second read immediately before dispatch so a concurrent
-                # Desktop/UI update is rejected instead of being overwritten.
-                latest_rows = catalog.saved_queue_rows(thread_id)
-                if latest_rows != rows:
-                    return {'state': 'rejected', 'reply': 'Desktop 可见队列正在变化，这条消息未发送、未排队；请重新查看队列后重发。'}
-                row = {
-                    'id': operation_id,
-                    'text': text,
-                    'createdAt': int(time.time() * 1000),
-                    'submission': {'hostId': 'local', 'status': 'queued'},
-                }
-                next_rows = [*rows, row]
-                result = self.call(
-                    thread_id, 'thread-follower-set-queued-follow-ups-state',
-                    {'state': {thread_id: next_rows}, 'discardedMessageIds': []}, 1,
-                    expected_owner=current['owner_id'], expected_connection=connection,
-                )
-            except (DesktopControlError, OSError, TimeoutError, ValueError, TypeError, KeyError):
-                return {'state': 'rejected', 'reply': '无法核实 Desktop 当前待发送列表，这条消息未发送、未排队。请在电脑查看。'}
-            if result['state'] != 'confirmed':
-                return {'state': result['state'], 'reply':
-                        '已尝试加入 Desktop 可见待发送列表，但没有取得确认；不会改走隐藏队列或自动重试，请查看电脑。'
-                        if result['state'] == 'unknown' else
-                        'Desktop 当前没有接受这条排队消息，未发送、未排队。'}
-            try:
-                from control_actions import normalize_saved_queue
-                entry = None
-                for _ in range(5):
-                    after_rows = catalog.saved_queue_rows(thread_id)
-                    matches = [item for item in after_rows if item.get('id') == operation_id]
-                    preserved = all(any(item == original for item in after_rows) for original in rows)
-                    if preserved and len(matches) == 1 and matches[0] == row:
-                        entry = normalize_saved_queue([matches[0]])[0]
-                        break
-                    time.sleep(0.05)
-                if entry is None:
-                    raise ValueError('queue-readback-mismatch')
-            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-                return {'state': 'unknown', 'reply':
-                        'Desktop 已受理排队请求，但回读未能确认这条消息；不会重复排队，请在电脑查看。'}
-            return {'state': 'confirmed', 'mode': 'queued', 'native': True,
-                    'queue_id': operation_id, 'entry': entry}
+        try:
+            current = self.snapshot(thread_id, expected_connection=connection)
+            if self._message_route(current) != 'queued':
+                return {'state': 'rejected', 'reply': '对话状态已变化，这条消息未发送、未排队；请重新查询后发送。'}
+            identity, _ = self.probe()
+            if identity != connection or current.get('owner_id') is None:
+                return {'state': 'rejected', 'reply': 'Codex 连接或对话所有者已变化，这条消息未发送、未排队。'}
+            rows = catalog.saved_queue_rows(thread_id)
+            if any(row.get('id') == operation_id for row in rows):
+                return {'state': 'rejected', 'reply': '这条消息编号已存在，未重复加入队列。'}
+            if len(rows) >= 200:
+                return {'state': 'rejected', 'reply': 'Desktop 可见待发送列表已达到上限，这条消息未发送、未排队。'}
+            # The native operation replaces the whole snapshot.  Read again
+            # immediately before dispatch and preserve the exact raw entries.
+            latest_rows = catalog.saved_queue_rows(thread_id)
+            if latest_rows != rows:
+                return {'state': 'rejected', 'reply': 'Desktop 可见队列正在变化，这条消息未发送、未排队；请重新查看队列后重发。'}
+            row = {
+                'id': operation_id,
+                'text': text,
+                'createdAt': int(time.time() * 1000),
+                'submission': {'hostId': 'local', 'status': 'queued'},
+            }
+            next_rows = [*rows, row]
+            result = self.call(
+                thread_id, 'thread-follower-set-queued-follow-ups-state',
+                {'state': {thread_id: next_rows}, 'discardedMessageIds': []}, 1,
+                expected_owner=current['owner_id'], expected_connection=connection,
+            )
+        except (DesktopControlError, OSError, TimeoutError, ValueError, TypeError, KeyError):
+            return {'state': 'rejected', 'reply': '无法核实 Desktop 当前待发送列表，这条消息未发送、未排队。请在电脑查看。'}
+        if result['state'] != 'confirmed':
+            return {'state': result['state'], 'reply':
+                    '已尝试加入 Desktop 可见待发送列表，但没有取得确认；不会改走隐藏队列或自动重试，请查看电脑。'
+                    if result['state'] == 'unknown' else
+                    'Desktop 当前没有接受这条排队消息，未发送、未排队。'}
+        try:
+            from control_actions import normalize_saved_queue
+            entry = None
+            for _ in range(5):
+                after_rows = catalog.saved_queue_rows(thread_id)
+                matches = [item for item in after_rows if item.get('id') == operation_id]
+                preserved = all(any(item == original for item in after_rows) for original in rows)
+                if preserved and len(matches) == 1 and matches[0] == row:
+                    entry = normalize_saved_queue([matches[0]])[0]
+                    break
+                time.sleep(0.05)
+            if entry is None:
+                raise ValueError('queue-readback-mismatch')
+        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+            return {'state': 'unknown', 'reply':
+                    'Desktop 已受理排队请求，但回读未能确认这条消息；不会重复排队，请在电脑查看。'}
+        return {'state': 'confirmed', 'mode': 'queued', 'native': True,
+                'queue_id': operation_id, 'entry': entry}
+
+    def preflight_guide_saved_queue_item(self, thread_id: str, entry: dict, catalog: Any,
+                                         connection: str | None = None) -> dict:
+        """Check the retryable busy/initializing cases before claiming an operation."""
+        try:
+            self.require_extended_contract()
+            from control_actions import normalize_saved_queue
+            rows = catalog.saved_queue_rows(thread_id)
+            matches = [row for row in rows if isinstance(row, dict) and row.get('id') == entry.get('id')]
+            current = normalize_saved_queue(matches)
+            if (len(matches) != 1 or len(current) != 1 or current[0]['digest'] != entry.get('digest')
+                    or current[0]['status'] != 'queued'):
+                return {'state': 'rejected', 'retryable': True,
+                        'reply': '这条排队消息已变化、开始或不再存在，未删除、未引导；请重新查看队列。'}
+        except (OSError, TimeoutError, ValueError, TypeError, KeyError, DesktopControlError, sqlite3.Error):
+            return {'state': 'rejected', 'retryable': True,
+                    'reply': '队列或当前窗口暂时无法核实，未删除、未引导；恢复连接后重试。'}
+        try:
+            before = self.snapshot(thread_id, expected_connection=connection)
+        except (OSError, TimeoutError, ValueError, TypeError, KeyError, DesktopControlError):
+            return {'state': 'rejected', 'retryable': True,
+                    'reply': '队列或当前窗口暂时无法核实，未删除、未引导；恢复连接后重试。'}
+        turn = before.get('turn') or {}
+        if turn.get('status') != 'inProgress':
+            return {'state': 'rejected', 'retryable': True,
+                    'reply': '当前没有正在运行的任务，未删除排队消息；请在任务运行时再引导。'}
+        if not turn.get('turnId') or not isinstance(before.get('cwd'), str) or not before['cwd']:
+            return {'state': 'rejected', 'retryable': True,
+                    'reply': '当前任务仍在初始化，未删除排队消息；稍后再试。'}
+        return {'state': 'confirmed', 'reply': '当前任务可引导。'}
 
     def submit_message(self, thread_id: str, text: str, connection: str,
                        operation_id: str, queue_func: Any) -> dict:
@@ -593,36 +652,36 @@ class NativeBackend:
         try:
             self.require_extended_contract()
         except Exception:
-            return {'state': 'rejected', 'reply': '当前 Desktop 原生接口无法核实，未删除、未引导；恢复连接后重新查看队列再试。'}
+            return {'state': 'rejected', 'retryable': True, 'reply': '当前 Desktop 原生接口无法核实，未删除、未引导；恢复连接后重新查看队列再试。'}
         from control_actions import normalize_saved_queue, signature
 
         try:
             rows = catalog.saved_queue_rows(thread_id)
             matches = [row for row in rows if isinstance(row, dict) and row.get('id') == entry.get('id')]
             if len(matches) != 1:
-                return {'state': 'rejected', 'reply': '这条排队消息已变化或不再唯一，未删除、未引导；请重新查看队列。'}
+                return {'state': 'rejected', 'retryable': True, 'reply': '这条排队消息已变化或不再唯一，未删除、未引导；请重新查看队列。'}
             original = matches[0]
             current = normalize_saved_queue([original])
             if (len(current) != 1 or current[0]['digest'] != entry.get('digest')
                     or current[0]['status'] != 'queued'):
-                return {'state': 'rejected', 'reply': '这条排队消息已开始、变化或不再存在，未删除、未引导；请重新查看队列。'}
+                return {'state': 'rejected', 'retryable': True, 'reply': '这条排队消息已开始、变化或不再存在，未删除、未引导；请重新查看队列。'}
             text = original.get('text')
             if not isinstance(text, str):
-                return {'state': 'rejected', 'reply': '排队正文无法安全读取，未删除、未引导。'}
+                return {'state': 'rejected', 'retryable': True, 'reply': '排队正文无法安全读取，未删除、未引导。'}
             text.encode('utf-8', errors='strict')
             if not 1 <= len(text.strip()) <= 4000:
-                return {'state': 'rejected', 'reply': '原排队正文为空或超过引导长度上限，未删除、未引导。'}
+                return {'state': 'rejected', 'retryable': True, 'reply': '原排队正文为空或超过引导长度上限，未删除、未引导。'}
 
             before = self.snapshot(thread_id, expected_connection=connection)
         except (OSError, TimeoutError, ValueError, UnicodeError, DesktopControlError,
                 sqlite3.Error, KeyError, TypeError):
-            return {'state': 'rejected', 'reply': '队列内容或当前窗口无法核实，未删除、未引导；请恢复连接后重查。'}
+            return {'state': 'rejected', 'retryable': True, 'reply': '队列内容或当前窗口无法核实，未删除、未引导；请恢复连接后重查。'}
 
         turn = before.get('turn') or {}
         if turn.get('status') != 'inProgress':
-            return {'state': 'rejected', 'reply': '当前没有正在运行的任务，未删除排队消息；请在任务运行时再引导。'}
+            return {'state': 'rejected', 'retryable': True, 'reply': '当前没有正在运行的任务，未删除排队消息；请在任务运行时再引导。'}
         if not turn.get('turnId') or not isinstance(before.get('cwd'), str) or not before['cwd']:
-            return {'state': 'rejected', 'reply': '当前任务仍在初始化，未删除排队消息；稍后再试。'}
+            return {'state': 'rejected', 'retryable': True, 'reply': '当前任务仍在初始化，未删除排队消息；稍后再试。'}
 
         try:
             removed_result = self.call(

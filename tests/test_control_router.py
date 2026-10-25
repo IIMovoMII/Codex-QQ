@@ -184,7 +184,8 @@ class ControlRouterTests(unittest.TestCase):
         self.assertIn("作废", self.send("继续", timestamp=time.time() - 10, quote=card))
         self.assertIn("作废", self.send("继续", message_id="offline", quote=card))
         self.assertEqual(self.calls, [])
-        self.assertIn("已提交", self.send("继续", quote=card))
+        self.assertIn("已提交", self.send("继续", message_id="fresh-after-reconnect", quote=card))
+        self.assertEqual(self.calls, [(THREAD_A, '继续')])
 
     def test_gateway_replay_uses_new_reply_time_not_old_quote_time(self):
         card = self.send("/use " + THREAD_A)
@@ -304,6 +305,20 @@ class ControlRouterTests(unittest.TestCase):
             self.assertEqual(self.send('暂停后的新消息', quote=card, message_id='native-start'), reply)
             submit.assert_called_once()
             self.assertEqual(self.calls, [])
+
+    def test_runtime_with_unsupported_state_schema_stays_alive_and_fails_closed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            data = root / 'CodexCC'; data.mkdir()
+            db = sqlite3.connect(data / 'control-state.sqlite')
+            db.execute('PRAGMA user_version=99'); db.close()
+            original = (data / 'control-state.sqlite').read_bytes()
+            with patch.dict(os.environ, {'CC_DATA_DIR': str(data), 'LOCALAPPDATA': str(root),
+                                         'CODEX_HOME': str(root / '.codex')}):
+                router = ControlRouter.runtime(lambda *_: (False, ''))
+                reply = router.handle({})
+            self.assertIn('无法安全读取', reply)
+            self.assertEqual((data / 'control-state.sqlite').read_bytes(), original)
 
     def test_native_busy_queue_returns_visible_queue_card(self):
         card = self.send('/use ' + THREAD_A)

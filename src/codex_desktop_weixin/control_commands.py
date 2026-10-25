@@ -26,6 +26,9 @@ class ActionCommands:
         try:
             result = action()
             reply, state = result['reply'], result['state']
+            if result.get('retryable') and state == 'rejected':
+                self.r.store.release_operation(self.scope, key)
+                return reply, state
         except Exception:
             reply, state = '操作处理结果未知，不会自动重发。请重新查询或在电脑核对。', 'unknown'
         self.r.store.finish_operation(self.scope, key, state, reply)
@@ -205,7 +208,7 @@ class ActionCommands:
                 updated = {**data, 'client_id': observed.get('client_id')}
                 return self.card('submission', updated, status_text(observed)
                                  + '\n引用回复“状态”继续查看本条，或“删除”移除本条排队消息。'
-                                 + '\n引用回复“对话”取得普通对话回执；此卡片不发送正文或转引导。', ttl=None), 'confirmed'
+                                 + '\n引用回复“对话”取得普通对话回执；此卡片不发送正文或转引导。', ttl=30 * 86400), 'confirmed'
             if text == '删除':
                 key = 'submission-delete:' + data['connection'] + ':' + thread_id + ':' + data['queue_id'] + ':' + data['text_digest']
                 return self._once(key, lambda: self.r.backend.remove_submission(data, self.r.catalog, self.connection))
@@ -247,6 +250,11 @@ class ActionCommands:
                     return '为避免排队正文和引导内容不一致，请只回复“引导”；系统会使用这条排队消息的原文。', 'rejected'
                 key = ('queue-guide:' + str(data.get('operation_id') or entry['id']) + ':'
                        + self.connection + ':' + thread_id + ':' + entry['digest'])
+                if hasattr(self.r.backend, 'preflight_guide_saved_queue_item'):
+                    checked = self._backend_call('preflight_guide_saved_queue_item', thread_id, entry,
+                                                 self.r.catalog, connection=self.connection)
+                    if checked.get('state') == 'rejected' and checked.get('retryable'):
+                        return checked['reply'], 'rejected'
                 return self._once(key, lambda: self._backend_call(
                     'guide_saved_queue_item', thread_id, entry, self.r.catalog, connection=self.connection))
             return '这条卡片可以回复“引导”（删除后将原文引导给当前任务）或“删除”。', 'rejected'
@@ -281,14 +289,14 @@ class ActionCommands:
             key = 'request:' + self.connection + ':' + data['owner_id'] + ':' + str(data['request_id']) + ':' + data['digest']
             return self._once(key, lambda: self.r.backend.respond_to_request(data, text))
         if kind == 'permission_options':
-            option_key = 'permission-options:' + str(data.get('operation_id', ''))
+            flow_key = 'permission-flow:' + str(data.get('operation_id', ''))
             if data.get('operation_id'):
-                previous = self.r.store.operation(self.scope, option_key)
-                if previous is not None and previous['state'] == 'cancelled':
-                    return '这张权限选项卡已取消，未修改权限。请重新引用对话卡片查看最新权限。', 'rejected'
+                previous = self.r.store.operation(self.scope, flow_key)
+                if previous is not None:
+                    return previous['reply'], previous['state']
             if text == '取消':
                 if data.get('operation_id'):
-                    return self._once(option_key, lambda: {'state': 'cancelled', 'reply': '已取消权限修改，原选项卡不再执行。'})
+                    return self._once(flow_key, lambda: {'state': 'cancelled', 'reply': '已取消权限修改，原选项卡及其确认卡不再执行。'})
                 return '没有修改权限。', 'confirmed'
             index = int(text) - 1 if text.isdigit() else -1
             if not 0 <= index < len(data['choices']):
@@ -298,21 +306,23 @@ class ActionCommands:
             if choice['name'] == '完全访问':
                 body += '完全访问允许模型操作本机文件并执行命令，不再等待普通审批。\n'
             body += f"引用回复“确认 {choice['name']}”才执行；回复“取消”不修改。"
-            return self.card('permission_confirm', {**data, 'choice': choice, 'operation_id': uuid.uuid4().hex}, body), 'confirmed'
+            # All descendants share the parent flow id. Cancellation and
+            # confirmation then contend on one durable SQLite claim.
+            return self.card('permission_confirm', {**data, 'choice': choice}, body), 'confirmed'
         if kind == 'permission_confirm':
             choice = data['choice']
-            cancel_key = 'permission-confirm-cancel:' + str(data.get('operation_id', ''))
+            flow_key = 'permission-flow:' + str(data.get('operation_id', ''))
             if data.get('operation_id'):
-                previous = self.r.store.operation(self.scope, cancel_key)
-                if previous is not None and previous['state'] == 'cancelled':
-                    return '这张权限确认卡已取消，未修改权限。请重新查看权限选项。', 'rejected'
+                previous = self.r.store.operation(self.scope, flow_key)
+                if previous is not None:
+                    return previous['reply'], previous['state']
             if text == '取消':
                 if data.get('operation_id'):
-                    return self._once(cancel_key, lambda: {'state': 'cancelled', 'reply': '已取消权限修改，原确认卡不再执行。'})
+                    return self._once(flow_key, lambda: {'state': 'cancelled', 'reply': '已取消权限修改，原选项卡及其确认卡不再执行。'})
                 return '没有修改权限。', 'confirmed'
             if text != '确认 ' + choice['name']:
                 return '未修改，请按卡片上的完整确认文字回复。', 'rejected'
-            return self._once('permission:' + data['operation_id'],
+            return self._once(flow_key,
                               lambda: self._backend_call('update_permissions', thread_id, choice['changes'], data['baseline'],
                                                          connection=self.connection))
         if kind == 'compaction':

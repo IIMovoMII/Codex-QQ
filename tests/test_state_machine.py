@@ -94,9 +94,19 @@ class StateMachineTests(unittest.TestCase):
 
     def test_waiting_notice_can_reappear_after_activity_and_a_new_request(self) -> None:
         machine = self.new_machine()
-        self.assertEqual(len(machine.apply(signal(SignalKind.USER_INPUT_REQUESTED, 1))), 1)
+        first = machine.apply(signal(SignalKind.USER_INPUT_REQUESTED, 1))
+        self.assertEqual(len(first), 1)
         machine.apply(signal(SignalKind.ACTIVITY, 2))
-        self.assertEqual(len(machine.apply(signal(SignalKind.USER_INPUT_REQUESTED, 3))), 1)
+        second = machine.apply(signal(SignalKind.USER_INPUT_REQUESTED, 3))
+        self.assertEqual(len(second), 1)
+        self.assertNotEqual(first[0].dedupe_key, second[0].dedupe_key)
+
+        replay = self.new_machine()
+        first_replay = replay.apply(signal(SignalKind.USER_INPUT_REQUESTED, 1))
+        replay.apply(signal(SignalKind.ACTIVITY, 2))
+        second_replay = replay.apply(signal(SignalKind.USER_INPUT_REQUESTED, 3))
+        self.assertEqual(first[0].dedupe_key, first_replay[0].dedupe_key)
+        self.assertEqual(second[0].dedupe_key, second_replay[0].dedupe_key)
 
     def test_terminal_history_is_bounded_without_scanning_old_turns(self) -> None:
         machine = StateMachine()
@@ -163,12 +173,20 @@ class StateMachineTests(unittest.TestCase):
         machine = StateMachine()
         machine.apply(Signal(SignalKind.TURN_STARTED, observed_at=BASE, session_id="s", turn_id="old-1", source="test"))
         machine.active_turn_by_session["s"] = "old-2"
-        machine.apply(Signal(SignalKind.ACTIVITY, observed_at=BASE, session_id="s", turn_id="old-2", source="test"))
-        machine.apply(Signal(SignalKind.TURN_STARTED, observed_at=BASE, session_id="s", turn_id="new", source="test"))
+        machine.apply(Signal(SignalKind.ACTIVITY, observed_at=BASE + timedelta(milliseconds=1), session_id="s", turn_id="old-2", source="test"))
+        machine.apply(Signal(SignalKind.TURN_STARTED, observed_at=BASE + timedelta(milliseconds=2), session_id="s", turn_id="new", source="test"))
 
         self.assertTrue(machine.turns[("s", "old-1")].terminal)
         self.assertTrue(machine.turns[("s", "old-2")].terminal)
         self.assertEqual([runtime.turn_id for runtime in machine.active_runtimes()], ["new"])
+
+    def test_late_nonterminal_event_does_not_reopen_an_older_turn(self):
+        machine = StateMachine()
+        machine.apply(Signal(SignalKind.TURN_STARTED, observed_at=BASE, session_id='s', turn_id='new'))
+        machine.apply(Signal(SignalKind.ACTIVITY, observed_at=BASE - timedelta(seconds=1), session_id='s', turn_id='old'))
+        machine.apply(Signal(SignalKind.PERMISSION_REQUESTED, observed_at=BASE, session_id='s', turn_id='old'))
+        self.assertEqual([runtime.turn_id for runtime in machine.active_runtimes()], ['new'])
+        self.assertNotIn(('s', 'old'), machine.turns)
 
     def test_late_old_terminal_does_not_clear_new_active_turn(self) -> None:
         machine = StateMachine()
@@ -176,6 +194,14 @@ class StateMachineTests(unittest.TestCase):
         machine.apply(Signal(SignalKind.TURN_STARTED, observed_at=BASE, session_id="s", turn_id="new", source="test"))
         machine.apply(Signal(SignalKind.TURN_COMPLETED, observed_at=BASE, session_id="s", turn_id="old", source="test"))
         self.assertEqual(machine.active_turn_by_session["s"], "new")
+
+    def test_unknown_late_terminal_does_not_create_a_second_active_turn(self) -> None:
+        machine = StateMachine()
+        machine.apply(Signal(SignalKind.TURN_STARTED, observed_at=BASE, session_id="s", turn_id="new", source="test"))
+        notes = machine.apply(Signal(SignalKind.TURN_COMPLETED, observed_at=BASE, session_id="s", turn_id="late-old", source="test"))
+        self.assertEqual([note.state for note in notes], [TurnState.COMPLETED])
+        self.assertTrue(machine.turns[("s", "late-old")].terminal)
+        self.assertEqual([runtime.turn_id for runtime in machine.active_runtimes()], ["new"])
 
     def test_terminal_rollout_wins_during_stop_grace(self) -> None:
         machine = self.new_machine()

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from models import Signal, SignalKind
-from runtime_io import append_json_line, atomic_write_json, default_data_dir, ensure_runtime_dirs
+from runtime_io import append_json_line, atomic_write_json, default_data_dir, ensure_runtime_dirs, rotate_log_file
 
 
 HOOK_FORMAT_VERSION = 1
@@ -166,6 +166,7 @@ def request_runtime_autostart(
             str(transcript_path or ""),
         ]
         log_path = ensure_runtime_dirs(root)["logs"] / "autostart-console.log"
+        rotate_log_file(log_path)
         with log_path.open("ab") as log:
             subprocess.Popen(
                 command,

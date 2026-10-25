@@ -8,6 +8,10 @@ from pathlib import Path
 from typing import Any
 
 
+MAX_LOG_BYTES = 8 * 1024 * 1024
+MAX_LOG_ARCHIVES = 4
+
+
 def default_data_dir() -> Path:
     local = os.environ.get("LOCALAPPDATA")
     if local:
@@ -61,11 +65,37 @@ def atomic_write_json(path: Path, value: Any) -> None:
 
 def append_json_line(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    rotate_log_file(path)
     encoded = (json.dumps(value, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
     with path.open("ab") as stream:
         stream.write(encoded)
         stream.flush()
         os.fsync(stream.fileno())
+
+
+def rotate_log_file(path: Path, *, max_bytes: int = MAX_LOG_BYTES) -> None:
+    """Bound append-only application logs before opening the next writer."""
+    try:
+        if path.stat().st_size <= max_bytes:
+            return
+    except OSError:
+        return
+    stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+    archived = path.with_name(f'{path.stem}-{stamp}-{os.getpid()}{path.suffix}')
+    try:
+        suffix = 1
+        while archived.exists():
+            archived = path.with_name(f'{path.stem}-{stamp}-{os.getpid()}-{suffix}{path.suffix}')
+            suffix += 1
+        os.replace(path, archived)
+    except OSError:
+        return
+    archives = sorted(path.parent.glob(f'{path.stem}-*{path.suffix}'), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True)
+    for old in archives[MAX_LOG_ARCHIVES:]:
+        try:
+            old.unlink()
+        except OSError:
+            pass
 
 
 def acquire_file_lock(path: Path) -> tuple[int, Path] | None:

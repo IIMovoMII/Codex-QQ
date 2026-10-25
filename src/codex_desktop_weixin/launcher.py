@@ -15,7 +15,7 @@ from typing import Any
 
 from process_watch import get_codex_desktop_process_status, request_codex_desktop_close
 from notifier import DeliverySettings
-from runtime_io import atomic_write_json, ensure_runtime_dirs
+from runtime_io import atomic_write_json, ensure_runtime_dirs, rotate_log_file
 from rollout import is_desktop_rollout
 
 
@@ -169,6 +169,8 @@ def _pid_alive(pid: int) -> bool:
 def read_monitor_pid(data_dir: Path, *, require_ready: bool = False) -> int | None:
     try:
         value = json.loads((data_dir / "state" / "monitor.json").read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            return None
         pid = int(value.get("pid", 0))
         if require_ready and value.get("ready") is False:
             return None
@@ -190,6 +192,8 @@ def clear_monitor_pid(data_dir: Path) -> None:
     path = data_dir / "state" / "monitor.json"
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            return
         if int(value.get("pid", 0)) != os.getpid():
             return
     except (FileNotFoundError, json.JSONDecodeError, OSError, TypeError, ValueError):
@@ -499,7 +503,16 @@ def cc_connect_api_status(data_dir: Path) -> str:
         start_offset = int(state.get("log_offset", 0))
     except (TypeError, ValueError):
         start_offset = 0
-    status = _api_status_from_log(data_dir / "logs" / "cc-connect.log", start_offset=start_offset)
+    log_path = data_dir / "logs" / "cc-connect.log"
+    try:
+        if log_path.stat().st_size < start_offset:
+            # The bounded console log was truncated while the managed process
+            # remained alive. A live API probe is stronger than a lost READY line.
+            if _socket_is_reachable(cc_connect_api_socket_path(data_dir)) is True:
+                return 'ready'
+    except OSError:
+        pass
+    status = _api_status_from_log(log_path, start_offset=start_offset)
     if status == "unknown" and not _directory_contains_name(cc_connect_api_socket_path(data_dir)):
         return "missing"
     return status
@@ -564,6 +577,7 @@ def start_cc_connect_service(data_dir: Path) -> dict[str, Any]:
             **socket_cleanup,
         }
     log_path = paths["logs"] / "cc-connect.log"
+    rotate_log_file(log_path)
     try:
         log_offset = log_path.stat().st_size
     except OSError:
@@ -840,6 +854,7 @@ def start_background_monitor(cli_path: Path, codex_home: Path, data_dir: Path) -
             | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
         )
     log_path = paths["logs"] / "monitor-console.log"
+    rotate_log_file(log_path)
     with log_path.open("ab") as log:
         process = subprocess.Popen(
             command,

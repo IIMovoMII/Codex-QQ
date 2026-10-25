@@ -12,7 +12,19 @@ from pathlib import Path
 PACKAGE_DIR = Path(__file__).resolve().parents[1] / "src" / "codex_desktop_weixin"
 sys.path.insert(0, str(PACKAGE_DIR))
 
-from winwatch import WindowsDirectoryWatcher
+from winwatch import WindowsDirectoryWatcher, _kernel32
+from ctypes import wintypes
+from unittest.mock import Mock, patch
+
+
+class WindowsApiSignatureTests(unittest.TestCase):
+    def test_kernel_handle_functions_have_pointer_width_signatures(self):
+        fake = type('Kernel', (), {'CancelIoEx': Mock(), 'CloseHandle': Mock()})()
+        with patch('winwatch.ctypes.WinDLL', return_value=fake, create=True):
+            _kernel32()
+        self.assertEqual(fake.CancelIoEx.argtypes, [wintypes.HANDLE, __import__('ctypes').c_void_p])
+        self.assertEqual(fake.CloseHandle.argtypes, [wintypes.HANDLE])
+        self.assertEqual(fake.CloseHandle.restype, wintypes.BOOL)
 
 
 @unittest.skipUnless(os.name == "nt", "Windows watcher test")
