@@ -1,11 +1,7 @@
 from __future__ import annotations
 
 import copy
-import os
 import sys
-import tempfile
-import threading
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -185,7 +181,7 @@ class MessageSubmissionTests(unittest.TestCase):
         self.assertEqual(self.starts(), [])
         self.queue.assert_not_called()
 
-    def test_busy_message_is_appended_to_desktop_visible_queue(self):
+    def test_busy_message_never_replaces_desktop_queue_snapshot(self):
         catalog = QueueCatalog()
         pipe = QueuePipe(catalog)
         state = {**self.state, 'turn': {'turnId': TURN, 'status': 'inProgress'},
@@ -193,41 +189,20 @@ class MessageSubmissionTests(unittest.TestCase):
         backend = NativeBackend(pipe_factory=lambda: pipe, contract_check=lambda: None, catalog=catalog)
         backend.snapshot = lambda _thread, expected_connection=None: copy.deepcopy(state)
         backend.probe = lambda: ('same-desktop', 1)
-        with patch('control_backend.pipe_server_identity', return_value=('same-desktop', 1, 'Codex.exe')):
-            result = backend.submit_message(THREAD, '忙时中文😀', 'same-desktop', CLIENT, self.queue)
-        self.assertEqual(result['state'], 'confirmed')
-        self.assertEqual(result['mode'], 'queued')
-        self.assertTrue(result['native'])
-        self.assertEqual(result['queue_id'], CLIENT)
-        self.assertEqual([row['id'] for row in catalog.rows], ['existing', CLIENT])
-        request = next(message for message in pipe.writes if message.get('method') == QUEUED_FOLLOWUPS_METHOD)
-        self.assertEqual([row['id'] for row in request['params']['state'][THREAD]], ['existing', CLIENT])
+        for edit in ('add', 'delete', 'reorder', 'consume'):
+            with self.subTest(edit=edit):
+                # A UI change may occur at any time. Rejection must neither
+                # overwrite that edit nor even request a replacement snapshot.
+                catalog.rows = [{'id': edit, 'text': '电脑端最新输入',
+                                 'submission': {'hostId': 'local', 'status': 'queued'}}]
+                expected = copy.deepcopy(catalog.rows)
+                result = backend.submit_message(THREAD, '忙时中文😀', 'same-desktop', CLIENT, self.queue)
+                self.assertEqual(result['state'], 'rejected')
+                self.assertIn('未发送、未排队', result['reply'])
+                self.assertIn('引导', result['reply'])
+                self.assertEqual(catalog.rows, expected)
+                self.assertEqual(pipe.writes, [])
         self.queue.assert_not_called()
-
-    def test_independent_acp_backends_share_one_visible_queue_writer_lock(self):
-        with tempfile.TemporaryDirectory() as temporary, patch.dict(os.environ, {
-                'CC_DATA_DIR': temporary, 'LOCALAPPDATA': temporary}):
-            backends = [NativeBackend(), NativeBackend()]
-            active = 0; maximum = 0; guard = threading.Lock()
-            def write(_thread, text, _connection, operation):
-                nonlocal active, maximum
-                with guard:
-                    active += 1; maximum = max(maximum, active)
-                time.sleep(0.05)
-                with guard:
-                    active -= 1
-                return {'state': 'confirmed', 'text': text, 'operation': operation}
-            for backend in backends:
-                backend._enqueue_native_follow_up_locked = write
-            outputs = []
-            threads = [threading.Thread(target=lambda i=i: outputs.append(
-                backends[i].enqueue_native_follow_up(THREAD, f'message-{i}', 'connection', f'op-{i}')))
-                for i in range(2)]
-            for thread in threads: thread.start()
-            for thread in threads: thread.join(timeout=3)
-            self.assertTrue(all(not thread.is_alive() for thread in threads))
-            self.assertEqual(len(outputs), 2)
-            self.assertEqual(maximum, 1)
 
 
 if __name__ == '__main__':

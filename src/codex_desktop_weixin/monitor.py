@@ -6,6 +6,7 @@ import json
 import os
 import queue
 import shutil
+import sqlite3
 import sys
 import time
 from dataclasses import replace as dataclass_replace
@@ -21,7 +22,7 @@ from notifier import NotificationDispatcher
 from launcher import stop_cc_connect_service, _query_process_identity
 from process_watch import ProcessStatus, get_codex_desktop_process_status
 from runtime_io import default_data_dir, ensure_runtime_dirs, atomic_write_json
-from rollout import is_desktop_rollout
+from rollout import is_desktop_rollout, parse_rollout_line
 from state_machine import StateMachine
 from tailer import IncrementalTailer
 from winwatch import DirectoryChange, WindowsDirectoryWatcher
@@ -68,7 +69,8 @@ class DesktopMonitor:
         self.config = config
         self.paths = ensure_runtime_dirs(config.data_dir)
         self.tailer = IncrementalTailer(self.paths["state"] / "cursors.json")
-        self.machine = StateMachine()
+        self.machine = StateMachine.from_checkpoint(self.tailer.checkpoint) if self.tailer.checkpoint is not None else StateMachine()
+        self.tailer.checkpoint = self.machine.checkpoint()
         self.notifier = NotificationDispatcher(self.paths["root"])
         self.metadata = ThreadMetadataResolver(config.codex_home)
         self.events: queue.Queue[DirectoryChange] = queue.Queue()
@@ -113,7 +115,67 @@ class DesktopMonitor:
                 flush=True,
             )
 
-    def _apply(self, signals: list[Signal], *, cutoff: datetime | None = None) -> None:
+    def _commit(self) -> None:
+        self.tailer.checkpoint = self.machine.checkpoint()
+        self.tailer.commit()
+        # The JSON checkpoint is the authoritative transaction boundary. Cold
+        # eviction happens after it, so a crash leaves a safe hot duplicate.
+        if len(self.tailer.cursors) > 2000:
+            try:
+                self.tailer.compact(set(self.machine.active_turn_by_session))
+            except (OSError, sqlite3.Error):
+                pass
+
+    def _recover_legacy_context(self, path: Path) -> None:
+        cursor = self.tailer.cursor_for(path)
+        if cursor is None or not cursor.needs_context:
+            return
+        try:
+            stat = path.stat()
+        except OSError:
+            return
+        machine_before = copy.deepcopy(self.machine)
+        cursor_before = replace(cursor)
+        identity = int(getattr(stat, 'st_ino', 0))
+        if stat.st_size < cursor.offset or (cursor.identity and identity and cursor.identity != identity):
+            cursor.needs_context = False
+            cursor.context_incomplete = True
+            return  # The normal tailer replacement guard will skip this file.
+        start = max(0, cursor.offset - 32 * 1024 * 1024)
+        with path.open('rb') as stream:
+            stream.seek(start)
+            raw = stream.read(cursor.offset - start)
+        if start:
+            newline = raw.find(b'\n')
+            raw = raw[newline + 1:] if newline >= 0 else b''
+        session = cursor.session_id
+        turn = None
+        complete = False
+        for line in raw.splitlines():
+            try:
+                signals = parse_rollout_line(line.decode('utf-8'), session_id=session, transcript_path=str(path))
+            except (UnicodeDecodeError, ValueError, TypeError, KeyError):
+                complete = False
+                continue
+            for signal in signals:
+                session = signal.session_id or session
+                if signal.kind == SignalKind.TURN_STARTED:
+                    turn = signal.turn_id
+                    complete = True
+                signal = replace(signal, session_id=session, turn_id=signal.turn_id or turn,
+                                 data={**signal.data, **({'context_incomplete': True} if not complete else {})})
+                self.machine.apply(signal)  # Restore context only, never replay notices.
+        cursor.context_incomplete = not complete
+        cursor.needs_context = False
+        try:
+            self._commit()
+        except Exception:
+            self.machine = machine_before
+            self.tailer.cursors[self.tailer.key_for(path)] = cursor_before
+            self.tailer.checkpoint = self.machine.checkpoint()
+            raise
+
+    def _apply(self, signals: list[Signal], *, cutoff: datetime | None = None, persist: bool = True) -> None:
         machine_before = copy.deepcopy(self.machine)
         status_before = copy.deepcopy(self.control_status)
         changed = False
@@ -136,7 +198,8 @@ class DesktopMonitor:
                 if cutoff is None or signal.observed_at >= cutoff:
                     self._emit(notes)
                 if signal.session_id and signal.kind == SignalKind.SESSION_ENDED:
-                    if self.control_status.pop(signal.session_id, None) is not None:
+                    if (signal.session_id not in self.machine.active_turn_by_session
+                            and self.control_status.pop(signal.session_id, None) is not None):
                         changed = True
                 elif signal.session_id:
                     tid = self.machine.active_turn_by_session.get(signal.session_id) or signal.turn_id
@@ -155,11 +218,14 @@ class DesktopMonitor:
                     "monitor_pid": os.getpid(), "monitor_created": self.monitor_created,
                     "threads": self.control_status,
                 })
+            if persist:
+                self._commit()
         except Exception:
             # Transcript cursors are committed after this method returns. Keep
             # the in-memory reducer aligned with that durable boundary too.
             self.machine = machine_before
             self.control_status = status_before
+            self.tailer.checkpoint = self.machine.checkpoint()
             raise
 
     def _read_transcript(
@@ -176,6 +242,7 @@ class DesktopMonitor:
                 return False
         except (FileNotFoundError, PermissionError, OSError):
             return False
+        self._recover_legacy_context(path)
         # Drain a bounded backlog immediately.  Ordinarily this loop runs once;
         # multiple iterations only occur after startup/race recovery.
         target_seen = target_turn_id is None
@@ -214,12 +281,13 @@ class DesktopMonitor:
                     if signal.kind == SignalKind.SESSION_STARTED or signal.observed_at >= not_before
                 ]
             try:
-                self._apply(signals)
-                self.tailer.commit()
+                self._apply(signals, persist=False)
+                self._commit()
             except Exception:
-                self.tailer.restore_cursor(path, previous_cursor)
                 self.machine = machine_before
                 self.control_status = status_before
+                self.tailer.checkpoint = self.machine.checkpoint()
+                self.tailer.restore_cursor(path, previous_cursor)
                 raise
             hook_terminal_seen |= any(
                 signal.turn_id == hook_turn_id
@@ -543,6 +611,9 @@ class DesktopMonitor:
             # A damaged diagnostic index is preserved for manual inspection.
             pass
         self.last_spool_cleanup = now_mono
+        self.notifier.prune()
+        self.tailer.checkpoint = self.machine.checkpoint()
+        self.tailer.compact(set(self.machine.active_turn_by_session))
 
     @staticmethod
     def _bound_open_log(path: Path) -> None:
@@ -643,13 +714,19 @@ class DesktopMonitor:
                 for entry_index, path in enumerate(directory.glob('*.jsonl')):
                     if entry_index >= MAX_RECENT_SCAN_ENTRIES:
                         break
-                    if self.tailer.is_known(path):
-                        continue
                     try:
-                        modified = path.stat().st_mtime
+                        stat = path.stat()
+                        modified = stat.st_mtime
                     except OSError:
                         continue
                     if modified >= cutoff.timestamp():
+                        key = self.tailer.key_for(path)
+                        hot_cursor = self.tailer.cursors.get(key)
+                        if hot_cursor is not None and hot_cursor.offset == stat.st_size:
+                            continue
+                        cursor = self.tailer.cursor_for(path, promote=False)
+                        if cursor is not None and cursor.offset == stat.st_size:
+                            continue
                         candidates.append((modified, path))
             except OSError:
                 continue
@@ -658,8 +735,13 @@ class DesktopMonitor:
             try:
                 if is_desktop_rollout(path) is not True:
                     continue
-                self.tailer.register_with_lookback(path)
-                self._read_transcript(path, not_before=cutoff)
+                if self.tailer.is_known(path):
+                    cursor = self.tailer.cursor_for(path, promote=False)
+                    if cursor is not None and cursor.offset != path.stat().st_size:
+                        self._read_transcript(path)
+                else:
+                    self.tailer.register_with_lookback(path)
+                    self._read_transcript(path, not_before=cutoff)
             except (FileNotFoundError, PermissionError, OSError, ValueError):
                 continue
 

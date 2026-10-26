@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from errors import normalize_error, redact_error_text
-from models import Confidence, ErrorSummary, Notification, Signal, SignalKind, TurnState
+from models import Confidence, ErrorCategory, ErrorSummary, Notification, Signal, SignalKind, TurnState
 
 
 MAX_RETAINED_ASSISTANT_CHARS = 16 * 1024
@@ -30,6 +30,7 @@ class TurnRuntime:
     stop_observed_at: datetime | None = None
     project_name: str = ""
     model: str = ""
+    context_complete: bool = True
 
 
 class StateMachine:
@@ -50,6 +51,92 @@ class StateMachine:
         self._retired_keys: set[tuple[str, str]] = set()
         self._retired_order: deque[tuple[str, str]] = deque()
         self.maintenance = False
+        self.session_watermarks: dict[str, datetime] = {}
+
+    def checkpoint(self) -> dict:
+        rows = []
+        for runtime in self.turns.values():
+            row = dict(vars(runtime))
+            row['last_assistant_message'] = redact_error_text(runtime.last_assistant_message, limit=MAX_RETAINED_ASSISTANT_CHARS)
+            row['state'] = runtime.state.value
+            for field_name in ('started_at', 'last_assistant_at', 'stop_observed_at'):
+                value = row[field_name]
+                row[field_name] = value.isoformat() if value else None
+            row['errors'] = [[at.isoformat(), error.to_dict()] for at, error in runtime.errors]
+            row['notified_states'] = [state.value for state in runtime.notified_states]
+            row['notification_epochs'] = {state.value: count for state, count in runtime.notification_epochs.items()}
+            rows.append(row)
+        return {'version': 1, 'turns': rows, 'context': self.session_context,
+                'retired': list(self._retired_order), 'maintenance': self.maintenance,
+                'watermarks': {session: at.isoformat() for session, at in self.session_watermarks.items()}}
+
+    @classmethod
+    def from_checkpoint(cls, value: dict) -> StateMachine:
+        if not isinstance(value, dict) or value.get('version') != 1:
+            raise ValueError('invalid-reducer-checkpoint')
+        result = cls()
+        try:
+            if not isinstance(value['turns'], list) or not isinstance(value['maintenance'], bool):
+                raise ValueError('invalid-reducer-shape')
+            for saved in value['turns']:
+                row = dict(saved)
+                row['state'] = TurnState(row['state'])
+                for field_name in ('started_at', 'last_assistant_at', 'stop_observed_at'):
+                    row[field_name] = datetime.fromisoformat(row[field_name]) if row[field_name] else None
+                row['errors'] = [(datetime.fromisoformat(at), ErrorSummary(**{**error,
+                                  'category': ErrorCategory(error['category'])})) for at, error in row['errors']]
+                row['notified_states'] = {TurnState(state) for state in row['notified_states']}
+                row['notification_epochs'] = {TurnState(state): int(count) for state, count in row['notification_epochs'].items()}
+                runtime = TurnRuntime(**row)
+                if (not isinstance(runtime.session_id, str) or not isinstance(runtime.turn_id, str)
+                        or not runtime.session_id or not runtime.turn_id
+                        or not isinstance(runtime.terminal, bool) or not isinstance(runtime.context_complete, bool)
+                        or any(not isinstance(getattr(runtime, name), str) for name in
+                               ('last_assistant_message', 'project_name', 'model'))
+                        or len(runtime.last_assistant_message) > MAX_RETAINED_ASSISTANT_CHARS
+                        or len(runtime.errors) > MAX_RETAINED_ERRORS
+                        or runtime.started_at is None
+                        or any(at is not None and at.tzinfo is None for at in
+                               (runtime.started_at, runtime.last_assistant_at, runtime.stop_observed_at))
+                        or any(at.tzinfo is None for at, _ in runtime.errors)
+                        or (runtime.session_id, runtime.turn_id) in result.turns):
+                    raise ValueError('invalid-runtime-identity')
+                result.turns[(runtime.session_id, runtime.turn_id)] = runtime
+                if not runtime.terminal:
+                    if runtime.session_id in result.active_turn_by_session:
+                        raise ValueError('multiple-active-turns')
+                    result._mark_active(runtime)
+                    result.active_turn_by_session[runtime.session_id] = runtime.turn_id
+                    if runtime.stop_observed_at:
+                        result.pending_stop_keys.add((runtime.session_id, runtime.turn_id))
+            result.session_context = dict(value['context'])
+            if any(not isinstance(session, str) or not isinstance(context, dict)
+                   or any(not isinstance(k, str) or not isinstance(v, str) for k, v in context.items())
+                   for session, context in result.session_context.items()):
+                raise ValueError('invalid-session-context')
+            for key in value['retired']:
+                if not isinstance(key, (list, tuple)) or len(key) != 2 or any(not isinstance(k, str) for k in key):
+                    raise ValueError('invalid-retired-key')
+                result._remember_retired(tuple(key))
+            result.session_watermarks = {session: datetime.fromisoformat(at) for session, at in value['watermarks'].items()}
+            if any(not isinstance(session, str) or at.tzinfo is None for session, at in result.session_watermarks.items()):
+                raise ValueError('invalid-session-watermark')
+            result.maintenance = value['maintenance']
+        except (KeyError, TypeError, ValueError, AttributeError) as error:
+            raise ValueError('invalid-reducer-checkpoint') from error
+        return result
+
+    def _watermark(self, session: str, at: datetime) -> None:
+        previous = self.session_watermarks.get(session)
+        self.session_watermarks.pop(session, None)
+        self.session_watermarks[session] = max(previous, at) if previous else at
+        if len(self.session_watermarks) > 2048:
+            for old in tuple(self.session_watermarks):
+                if old not in self.active_turn_by_session:
+                    self.session_watermarks.pop(old)
+                    self.session_context.pop(old, None)
+                    if len(self.session_watermarks) <= 2048:
+                        break
 
     def _clear_active_if_matches(self, runtime: TurnRuntime) -> None:
         if self.active_turn_by_session.get(runtime.session_id) == runtime.turn_id:
@@ -149,6 +236,9 @@ class StateMachine:
         if runtime is None and key in self._retired_keys:
             return None
         if runtime is None and create:
+            if (signal.kind not in (SignalKind.TURN_COMPLETED, SignalKind.TURN_ABORTED)
+                    and signal.observed_at < self.session_watermarks.get(key[0], datetime.min.replace(tzinfo=timezone.utc))):
+                return None
             # Records can arrive without TURN_STARTED. Keep the one-active-turn
             # invariant here too, and never let an older signal resurrect a
             # turn after a newer one has become active.
@@ -229,6 +319,9 @@ class StateMachine:
 
         session = signal.session_id or "unknown-session"
         if signal.kind == SignalKind.SESSION_STARTED:
+            if signal.observed_at < self.session_watermarks.get(session, datetime.min.replace(tzinfo=timezone.utc)):
+                return []
+            self._watermark(session, signal.observed_at)
             session = signal.session_id or "unknown-session"
             context = self._context_from_signal(signal)
             previous = self.session_context.get(session, {})
@@ -239,6 +332,13 @@ class StateMachine:
             return []
 
         if signal.kind == SignalKind.SESSION_ENDED:
+            if signal.observed_at < self.session_watermarks.get(session, datetime.min.replace(tzinfo=timezone.utc)):
+                return []
+            active = [runtime for (prior_session, _), runtime in self.turns.items()
+                      if prior_session == session and not runtime.terminal]
+            if active and any(runtime.started_at >= signal.observed_at for runtime in active):
+                return []
+            self._watermark(session, signal.observed_at)
             # SessionEnd is authoritative lifecycle cleanup, not a task
             # result.  Without this branch a Desktop session that ends while
             # the process remains alive leaves a permanent active mapping.
@@ -251,11 +351,14 @@ class StateMachine:
             return []
 
         if signal.kind == SignalKind.TURN_STARTED:
+            if signal.observed_at < self.session_watermarks.get(session, datetime.min.replace(tzinfo=timezone.utc)):
+                return []
             turn = signal.turn_id or f"unknown-{int(signal.observed_at.timestamp())}"
             # A Codex session has only one current turn. Old unfinished turns
             # are retired silently instead of retaining stale running state.
             if (session, turn) in self._retired_keys:
                 return []
+            self._watermark(session, signal.observed_at)
             for prior_turn in tuple(self.active_turns_by_session.get(session, set())):
                 if prior_turn == turn:
                     continue
@@ -284,8 +387,11 @@ class StateMachine:
         runtime = self._runtime(signal)
         if runtime is None:
             return []
+        if signal.data.get('context_incomplete'):
+            runtime.context_complete = False
         if runtime.terminal and signal.kind not in (SignalKind.PROCESS_STARTED, SignalKind.MAINTENANCE_STARTED, SignalKind.MAINTENANCE_ENDED):
             return []
+        self._watermark(session, signal.observed_at)
 
         notifications: list[Notification] = []
         if signal.kind in (
@@ -368,6 +474,7 @@ class StateMachine:
             return [note] if note else []
 
         if signal.kind == SignalKind.TURN_COMPLETED:
+            self._watermark(session, signal.observed_at)
             embedded_error = signal.data.get("error")
             final_message = signal.data.get("last_assistant_message")
             if isinstance(final_message, str) and final_message:
@@ -399,6 +506,10 @@ class StateMachine:
                     message=failure.public_message,
                     error=failure,
                 )
+            elif not runtime.context_complete:
+                note = self._notification(runtime, state=TurnState.RESULT_UNKNOWN,
+                    confidence=Confidence.INFERRED, title='Codex 任务已结束，结果未确认',
+                    message='部分任务记录无法恢复或格式异常，请在电脑核对最终结果。')
             else:
                 preview = redact_error_text(runtime.last_assistant_message or "任务已经完成，但没有可显示的最终回复。", limit=1200)
                 note = self._notification(

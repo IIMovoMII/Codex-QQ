@@ -48,6 +48,7 @@ class ControlRouter:
         self.availability_check = availability_check
         self._bridge_scopes: set[str] = set()
         self.state_unavailable = isinstance(store, _UnavailableControlStore)
+        self._last_prune = time.monotonic()
         try:
             self.store.prune()
         except (OSError, sqlite3.Error, ValueError, TypeError):
@@ -77,6 +78,12 @@ class ControlRouter:
         return cls(store, catalog, NativeBackend(catalog=catalog), queue_func, availability_check=check)
 
     def handle(self, params: Any) -> str:
+        if time.monotonic() - self._last_prune >= 3600:
+            try:
+                self.store.prune()
+                self._last_prune = time.monotonic()
+            except (OSError, sqlite3.Error, ValueError, TypeError):
+                return '本地控制记录暂时无法维护，未执行指令；请稍后重试。'
         if self.state_unavailable:
             return '本机 QQ 控制状态无法安全读取，未执行任何操作；原有状态文件已保留。请检查状态数据库或迁移文件后重试。'
         if self.availability_check is not None:
@@ -464,8 +471,9 @@ class ControlRouter:
             payload.encode("utf-8", errors="strict")
         except UnicodeEncodeError:
             return "消息包含损坏字符，未发送，请重新输入原文。", "rejected"
-        # Match Desktop's composer: idle/paused starts a new native turn; a
-        # running task appends to the same visible native follow-up list.
+        # Match Desktop's safe boundary: idle/paused starts a new native turn;
+        # the running-task snapshot replacement path is disabled until Desktop
+        # exposes a conditional append/CAS operation.
         result = self.backend.submit_message(thread_id, payload, meta['_desktop_identity'],
                                              str(uuid.uuid4()), self.queue_func)
         if result['state'] != 'confirmed':

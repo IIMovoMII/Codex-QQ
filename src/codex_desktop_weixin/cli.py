@@ -80,13 +80,19 @@ def command_monitor(
     write_pid: bool,
     manage_cc_connect: bool,
 ) -> int:
-    if write_pid:
-        existing = read_monitor_pid(data_dir)
-        if existing and existing != os.getpid():
-            print(json.dumps({"error": "monitor_already_running", "pid": existing}, ensure_ascii=False))
-            return 3
-        write_monitor_pid(data_dir, ready=False)
+    worker_lock = acquire_file_lock(data_dir / 'state' / 'app.lock')
+    if worker_lock is None:
+        print(json.dumps({'error': 'monitor_already_running'}, ensure_ascii=False))
+        return 3
+    owns_pid = False
     try:
+        if write_pid:
+            existing = read_monitor_pid(data_dir)
+            if existing and existing != os.getpid():
+                print(json.dumps({'error': 'monitor_already_running', 'pid': existing}, ensure_ascii=False))
+                return 3
+            write_monitor_pid(data_dir, ready=False)
+            owns_pid = True
         monitor = DesktopMonitor(
             MonitorConfig(
                 codex_home=codex_home,
@@ -101,8 +107,11 @@ def command_monitor(
         )
         return 0
     finally:
-        if write_pid:
-            clear_monitor_pid(data_dir)
+        try:
+            if owns_pid:
+                clear_monitor_pid(data_dir)
+        finally:
+            os.close(worker_lock[0])
 
 
 def command_install_hooks(codex_home: Path, data_dir: Path) -> int:
@@ -338,7 +347,7 @@ def build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--include-examples", action="store_true", help="输出少量脱敏后的代表错误")
     replay = sub.add_parser("replay", help="只读回放一个 Codex JSONL 会话")
     replay.add_argument("path", type=Path)
-    monitor = sub.add_parser("monitor", help="运行本地影子监控")
+    monitor = sub.add_parser("monitor", help="运行本地监控；投递方式以 settings.json 为准")
     monitor.add_argument("--codex-home", type=Path, default=_default_codex_home())
     monitor.add_argument("--data-dir", type=Path, default=default_data_dir())
     monitor.add_argument("--duration", type=float, default=None, help="测试运行秒数；省略则持续运行")

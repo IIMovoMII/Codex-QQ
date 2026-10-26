@@ -33,7 +33,7 @@ HELP_PAGES = {
     '任务': (
         '🚀 把任务交给电脑\n\n'
         '先引用目标对话的回执或提醒，再发送：\n'
-        '普通正文 → 空闲时开始，忙碌时排队\n'
+        '普通正文 → 空闲时开始；忙碌时拒绝，请稍后重发\n'
         '继续 → 开始一轮继续任务\n'
         '暂停 → 停止当前这一轮\n'
         '引导 先检查登录 → 给执行中的任务补充要求\n\n'
@@ -83,7 +83,7 @@ def help_text(topic: str = '') -> str:
 
 
 def notification_heading(title: str, state: str) -> str:
-    icon = {'completed': '✅', 'failed': '⚠️', 'interrupted': '⏸️',
+    icon = {'completed': '✅', 'failed': '⚠️', 'result_unknown': '⚠️', 'interrupted': '⏸️',
             'waiting_input': '🙋', 'question_available': '🙋',
             'waiting_approval': '🔐'}.get(state)
     return f'{icon} {title}' if icon and not title.startswith(icon) else title

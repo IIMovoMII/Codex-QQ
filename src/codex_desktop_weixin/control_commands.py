@@ -240,6 +240,10 @@ class ActionCommands:
             return self.card('request', entry, describe_request(request)), 'confirmed'
         if kind == 'queued':
             entry = data['entry']
+            if text == '对话':
+                return self.r._thread_card(self.scope, self.r.catalog.thread(thread_id), connection=self.connection), 'confirmed'
+            if text in ('队列', '状态'):
+                return self.command(thread_id, '队列', '')
             if text == '删除':
                 return self._once('queue-delete:' + thread_id + ':' + entry['id'] + ':' + entry['digest'],
                                   lambda: self._backend_call('remove_saved_queue_item', thread_id, entry, self.r.catalog,

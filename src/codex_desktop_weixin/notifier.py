@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import time
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from errors import redact_error_text
+from delivery_ledger import DeliveryLedger, MAX_LEDGER_ROWS
 from models import Notification, TurnState
 from mobile_copy import notification_heading
 from runtime_io import append_json_line, atomic_write_json
@@ -199,13 +201,15 @@ class NotificationDispatcher:
         self.sender = sender or CCConnectSender(self.settings)
         self._last_local_recovery: float | None = None
         self._local_recovery_cooldown = 60.0
-        self._shadow_keys: set[str] = set()
-        self._logged_successes: set[str] = set()
-        self._sent_in_process: set[str] = set()
-        # A transcript replay after a failed cursor commit must not append the
-        # same shadow journal row twice. The active journal and its bounded
-        # archives are small enough to rebuild this idempotency set at startup.
-        for path in sorted(self.logs.glob("shadow-notifications*.jsonl")):
+        self.ledger = DeliveryLedger(data_dir / 'state' / 'delivery.sqlite', pending=self.pending)
+        # If every durable success write fails, stop further sends until this
+        # one fact is saved. Memory remains bounded even during disk failure.
+        self._unrecorded_success: tuple[Path, dict] | None = None
+        shadowed: set[str] = set()
+        delivered: set[str] = set()
+        # Migrate bounded legacy journals, including rotated success evidence.
+        for path in sorted(self.logs.glob("shadow-notifications*.jsonl"),
+                           key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
             try:
                 with path.open("r", encoding="utf-8") as stream:
                     for line in stream:
@@ -213,22 +217,36 @@ class NotificationDispatcher:
                             row = json.loads(line)
                             key = row.get("dedupe_key") if isinstance(row, dict) else None
                             if isinstance(key, str) and key:
-                                self._shadow_keys.add(key)
+                                shadowed.add(hashlib.sha256(key.encode('utf-8')).hexdigest()[:32] + '.json')
+                                if len(shadowed) >= MAX_LEDGER_ROWS:
+                                    break
                         except (json.JSONDecodeError, UnicodeError):
                             continue
             except OSError:
                 continue
-        try:
-            with self.delivery_log.open('r', encoding='utf-8') as stream:
+            if len(shadowed) >= MAX_LEDGER_ROWS:
+                break
+        for path in sorted(self.logs.glob('delivery*.jsonl'),
+                           key=lambda p: p.stat().st_mtime, reverse=True)[:5]:
+            try:
+                stream = path.open('r', encoding='utf-8')
+            except OSError:
+                continue
+            with stream:
                 for line in stream:
                     try:
                         row = json.loads(line)
-                        if isinstance(row, dict) and row.get('success') is True and isinstance(row.get('item'), str):
-                            self._logged_successes.add(row['item'])
+                        if (isinstance(row, dict) and row.get('success') is True
+                                and not row.get('recovery')
+                                and row.get('event', 'delivery') == 'delivery'
+                                and isinstance(row.get('item'), str)):
+                            name = row['item']
+                            if (self.pending / name).exists():
+                                delivered.add(name)
                     except (json.JSONDecodeError, UnicodeError):
                         continue
-        except OSError:
-            pass
+        self.ledger.import_facts(shadowed, delivered)
+        self.ledger.prune(self.pending)
 
     @property
     def log_path(self) -> Path:
@@ -251,6 +269,7 @@ class NotificationDispatcher:
         if self.settings.mode == "cc-connect":
             if ((self.sent / name).exists() or (self.pending / name).exists()
                     or (self.sent_state / name).exists()
+                    or self.ledger.contains(name, delivered=True)
                     or notification.state == TurnState.QUESTION_AVAILABLE and (self.data_dir / 'outbox' / 'obsolete' / name).exists()):
                 return
             # The outbox is authoritative. If this atomic write fails, the
@@ -261,10 +280,30 @@ class NotificationDispatcher:
                 "attempts": 0,
                 "next_attempt_at": notification.created_at.isoformat(),
             })
-        key = notification.dedupe_key or name
-        if key not in self._shadow_keys:
+        if not self.ledger.contains(name):
             self.shadow.emit(notification)
-            self._shadow_keys.add(key)
+            self.ledger.record(name)
+
+    def prune(self) -> None:
+        self.ledger.prune(self.pending)
+
+    def _persist_success(self, path: Path, item: dict) -> bool:
+        durable = False
+        try:
+            self.ledger.record(path.name, delivered=True)
+            durable = True
+        except (OSError, sqlite3.Error):
+            pass
+        # Independent writes: failure of the pending update must not prevent
+        # the separate success marker from being attempted.
+        for target, value in ((path, item), (self.sent_state / path.name,
+                              {'item': path.name, 'sent_at': item['sent_at']})):
+            try:
+                atomic_write_json(target, value)
+                durable = True
+            except OSError:
+                pass
+        return self._archive_sent(path) or durable
 
     def resolve_async_answers(self, session_id: str, answers: list[dict]) -> int:
         """Retire only this batch's unsent notice once ALL its questions were answered.
@@ -349,6 +388,11 @@ class NotificationDispatcher:
     def flush(self, *, max_items: int = 1) -> int:
         if self.settings.mode != "cc-connect":
             return 0
+        if self._unrecorded_success is not None:
+            path, item = self._unrecorded_success
+            if not self._persist_success(path, item):
+                return 0
+            self._unrecorded_success = None
         delivered = 0
         attempted = 0
         now = datetime.now(timezone.utc)
@@ -367,7 +411,7 @@ class NotificationDispatcher:
             if attempted >= max_items:
                 break
             try:
-                if (path.name in self._sent_in_process or path.name in self._logged_successes
+                if (self.ledger.contains(path.name, delivered=True) or (self.sent / path.name).exists()
                         or (self.sent_state / path.name).exists()):
                     self._archive_sent(path)
                     continue
@@ -400,7 +444,8 @@ class NotificationDispatcher:
                             {
                                 "at": now.isoformat(),
                                 "item": path.name,
-                                "success": recovered,
+                                "event": "recovery",
+                                "recovery_success": recovered,
                                 "attempt": int(item.get("attempts", 0)),
                                 "recovery": "cc_connect_local_api",
                                 "detail": recovery_detail,
@@ -411,6 +456,10 @@ class NotificationDispatcher:
                         else:
                             detail = f"{detail}; 自动恢复失败：{recovery_detail}"
                 attempts = int(item.get("attempts", 0)) + 1
+            except sqlite3.Error:
+                # An unreadable success ledger is never permission to resend
+                # or quarantine a potentially delivered pending notification.
+                raise
             except Exception as error:
                 detail = redact_error_text(str(error), limit=300)
                 append_json_line(
@@ -426,32 +475,22 @@ class NotificationDispatcher:
             try:
                 append_json_line(
                     self.delivery_log,
-                    {"at": now.isoformat(), "item": path.name, "success": success,
+                    {"at": now.isoformat(), "item": path.name, "event": "delivery", "success": success,
                      "attempt": attempts, "detail": detail},
                 )
-                if success:
-                    self._logged_successes.add(path.name)
             except OSError:
                 # The pending record below still gets a durable sent marker.
                 pass
             if success:
-                self._sent_in_process.add(path.name)
                 # Persist the external success before archive movement. If a
                 # Windows scanner holds the file, the next process only retries
                 # the rename and never sends the notification again.
                 item['delivery_state'] = 'sent'
                 item['sent_at'] = now.isoformat()
-                try:
-                    atomic_write_json(path, item)
-                    atomic_write_json(self.sent_state / path.name,
-                                      {'item': path.name, 'sent_at': now.isoformat()})
-                except OSError:
-                    # Keep the in-process tombstone; on restart the delivery
-                    # log is the durable source if its append succeeded.
-                    self._logged_successes.add(path.name)
+                if not self._persist_success(path, item):
+                    self._unrecorded_success = (path, item)
                     delivered += 1
-                    continue
-                self._archive_sent(path)
+                    break
                 delivered += 1
                 continue
             delay = min(300, 5 * (2 ** min(attempts - 1, 6)))

@@ -42,6 +42,7 @@ class TurnState(StrEnum):
     POSSIBLE_STALL = "possible_stall"
     SUSPECTED_STALL = "suspected_stall"
     COMPLETED = "completed"
+    RESULT_UNKNOWN = 'result_unknown'
     FAILED = "failed"
     INTERRUPTED = "interrupted"
     DISCONNECTED = 'disconnected'

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sqlite3
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -14,6 +15,8 @@ from runtime_io import append_json_line, atomic_write_json
 
 
 _SESSION_ID_PATTERN = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=\.jsonl$)", re.IGNORECASE)
+_COLD_CURSOR_RETENTION = 30 * 86400
+_MAX_COLD_CURSORS = 20000
 
 
 def canonical_path_key(path: str | Path) -> str:
@@ -48,24 +51,35 @@ class Cursor:
     # read budget.  Once set, consume chunks until the next newline so one
     # pathological tool payload cannot wedge the transcript forever.
     skipping_oversized_line: bool = False
+    context_incomplete: bool = False
+    needs_context: bool = False
 
 
 class IncrementalTailer:
     def __init__(self, state_path: Path) -> None:
         self.state_path = state_path
         self.cursors: dict[str, Cursor] = {}
+        self.checkpoint: dict | None = None
+        self.cold_path = state_path.with_suffix('.sqlite')
         self._load()
 
     def _load(self) -> None:
         try:
             raw = json.loads(self.state_path.read_text(encoding="utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except FileNotFoundError:
             return
+        except (json.JSONDecodeError, OSError) as error:
+            raise ValueError('invalid-monitor-checkpoint') from error
         if not isinstance(raw, dict):
-            return
+            raise ValueError('invalid-monitor-checkpoint')
+        if 'version' in raw:
+            if raw.get('version') != 2 or not isinstance(raw.get('cursors'), dict) or not isinstance(raw.get('reducer'), dict):
+                raise ValueError('unsupported-monitor-checkpoint')
+            self.checkpoint = raw['reducer']
+            raw = raw['cursors']
         for path, value in raw.items():
             if not isinstance(value, dict):
-                continue
+                raise ValueError('invalid-monitor-cursor')
             try:
                 candidate = Cursor(
                     offset=max(0, int(value.get("offset", 0))),
@@ -73,6 +87,8 @@ class IncrementalTailer:
                     session_id=str(value.get("session_id") or session_id_from_path(Path(path))),
                     turn_id=value.get('turn_id') if isinstance(value.get('turn_id'), str) else None,
                     skipping_oversized_line=bool(value.get('skipping_oversized_line', False)),
+                    context_incomplete=bool(value.get('context_incomplete', False)),
+                    needs_context=bool(value.get('needs_context', self.checkpoint is None)),
                 )
                 key = canonical_path_key(path)
                 existing = self.cursors.get(key)
@@ -81,11 +97,56 @@ class IncrementalTailer:
                 # keep the furthest cursor so the alias can never replay history.
                 if existing is None or candidate.offset > existing.offset:
                     self.cursors[key] = candidate
-            except (TypeError, ValueError):
-                continue
+            except (TypeError, ValueError) as error:
+                raise ValueError('invalid-monitor-cursor') from error
 
     def _save(self) -> None:
-        atomic_write_json(self.state_path, {path: asdict(cursor) for path, cursor in self.cursors.items()})
+        cursors = {path: asdict(cursor) for path, cursor in self.cursors.items()}
+        value = cursors if self.checkpoint is None else {'version': 2, 'cursors': cursors, 'reducer': self.checkpoint}
+        atomic_write_json(self.state_path, value)
+
+    def compact(self, active_sessions: set[str], *, max_hot: int = 2000) -> None:
+        candidates = [(key, cursor) for key, cursor in self.cursors.items()
+                      if cursor.session_id not in active_sessions]
+        evict = candidates[:max(0, len(self.cursors) - max_hot)]
+        if not evict:
+            return
+        self.cold_path.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(self.cold_path)
+        try:
+            with db:
+                db.execute('CREATE TABLE IF NOT EXISTS cursors (path TEXT PRIMARY KEY, value TEXT NOT NULL, updated REAL NOT NULL DEFAULT 0)')
+                columns = {row[1] for row in db.execute('PRAGMA table_info(cursors)')}
+                if 'updated' not in columns:
+                    db.execute('ALTER TABLE cursors ADD COLUMN updated REAL NOT NULL DEFAULT 0')
+                now = time.time()
+                db.executemany('INSERT OR REPLACE INTO cursors(path,value,updated) VALUES(?,?,?)',
+                               [(key, json.dumps(asdict(cursor)), now) for key, cursor in evict])
+                self._prune_cold(db, now)
+        finally:
+            db.close()
+        for key, _ in evict:
+            self.cursors.pop(key, None)
+        self._save()
+
+    @staticmethod
+    def _prune_cold(db: sqlite3.Connection, now: float) -> None:
+        rows = db.execute('SELECT path,updated FROM cursors').fetchall()
+        cutoff = now - _COLD_CURSOR_RETENTION
+        missing = [(path,) for path, updated in rows
+                   if updated < cutoff and not Path(path).exists()]
+        if missing:
+            db.executemany('DELETE FROM cursors WHERE path=?', missing)
+        remaining = len(rows) - len(missing)
+        if remaining <= _MAX_COLD_CURSORS:
+            return
+        # Never evict a still-existing path solely to meet a count limit:
+        # replaying a reused transcript name is less safe than retaining a
+        # small amount of metadata. Missing paths are safe after the window.
+        candidates = [(updated, path) for path, updated in rows
+                      if (path,) not in missing and updated < cutoff and not Path(path).exists()]
+        for _updated, path in sorted(candidates)[:max(0, remaining - _MAX_COLD_CURSORS)]:
+            db.execute('DELETE FROM cursors WHERE path=?', (path,))
 
     def _log_oversized_record(self) -> None:
         try:
@@ -114,11 +175,29 @@ class IncrementalTailer:
     def key_for(self, path: str | Path) -> str:
         return canonical_path_key(path)
 
-    def cursor_for(self, path: str | Path) -> Cursor | None:
-        return self.cursors.get(self.key_for(path))
+    def _cold_cursor(self, key: str) -> Cursor | None:
+        if not self.cold_path.exists():
+            return None
+        db = sqlite3.connect(self.cold_path)
+        try:
+            row = db.execute('SELECT value FROM cursors WHERE path=?', (key,)).fetchone()
+        finally:
+            db.close()
+        return Cursor(**json.loads(row[0])) if row else None
+
+    def cursor_for(self, path: str | Path, *, promote: bool = True) -> Cursor | None:
+        key = self.key_for(path)
+        if key not in self.cursors:
+            cursor = self._cold_cursor(key)
+            if cursor is not None:
+                if not promote:
+                    return cursor
+                self.cursors[key] = cursor
+        return self.cursors.get(key)
 
     def is_known(self, path: Path) -> bool:
-        return self.cursor_for(path) is not None
+        key = self.key_for(path)
+        return key in self.cursors or self._cold_cursor(key) is not None
 
     def register_at_end(self, path: Path) -> Cursor:
         resolved = path.resolve()
@@ -176,7 +255,7 @@ class IncrementalTailer:
         resolved = path.resolve()
         key = self.key_for(resolved)
         stat = resolved.stat()
-        cursor = self.cursors.get(key)
+        cursor = self.cursor_for(resolved)
         if cursor is None:
             cursor = self.register_from_start(resolved)
         identity = int(getattr(stat, "st_ino", 0))
@@ -215,6 +294,7 @@ class IncrementalTailer:
         if last_newline < 0:
             if len(raw) >= max_bytes:
                 self._log_oversized_record()
+                cursor.context_incomplete = True
                 cursor.offset += len(raw)
                 cursor.skipping_oversized_line = True
                 if persist:
@@ -228,9 +308,22 @@ class IncrementalTailer:
             try:
                 line = raw_line.decode("utf-8")
                 parsed = parse_rollout_line(line, session_id=session_id, transcript_path=str(resolved))
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except (UnicodeDecodeError, ValueError, TypeError, KeyError):
+                cursor.context_incomplete = True
+                try:
+                    append_json_line(self.state_path.parent.parent / 'logs' / 'tailer-errors.jsonl',
+                                     {'event': 'invalid-record-skipped', 'offset': cursor.offset + consumed - len(raw_line),
+                                      'at': time.time()})
+                except OSError:
+                    pass
                 continue
             for signal in parsed:
+                if signal.kind == SignalKind.TURN_STARTED:
+                    cursor.context_incomplete = False
+                if cursor.context_incomplete:
+                    signal = Signal(kind=signal.kind, observed_at=signal.observed_at, session_id=signal.session_id,
+                                    turn_id=signal.turn_id, transcript_path=signal.transcript_path,
+                                    source=signal.source, data={**signal.data, 'context_incomplete': True})
                 if signal.kind == SignalKind.SESSION_STARTED and signal.session_id:
                     session_id = signal.session_id
                     cursor.session_id = session_id

@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import json
-import hashlib
 import os
 import re
 import sqlite3
-import threading
 import time
 import uuid
 from pathlib import Path
@@ -25,7 +23,6 @@ class NativeBackend:
         self.process_image: str | None = None
         self.app_tools = app_tools
         self.catalog = catalog
-        self._queue_locks: dict[str, threading.Lock] = {}
 
     def native_tools(self) -> Any:
         if self.app_tools is None:
@@ -132,7 +129,7 @@ class NativeBackend:
             if pid and value.get("monitor_pid") == pid and value.get("monitor_created") == _query_process_identity(pid).get("process_start_time"):
                 row = value.get("threads", {}).get(thread_id)
                 state = row.get('state') if isinstance(row, dict) else None
-                label = {"running": "运行中", "waiting_approval": "等待审批", "waiting_input": "等待回答", "completed": "空闲（已完成）", "failed": "出错", "interrupted": "已暂停", "disconnected": "未连接（任务结果未知）", "crashed": "异常停止", "idle": "空闲"}.get(state)
+                label = {"running": "运行中", "waiting_approval": "等待审批", "waiting_input": "等待回答", "completed": "空闲（已完成）", "result_unknown": "结果未确认", "failed": "出错", "interrupted": "已暂停", "disconnected": "未连接（任务结果未知）", "crashed": "异常停止", "idle": "空闲"}.get(state)
                 if label:
                     return label
         except (OSError, ValueError, TypeError):
@@ -258,96 +255,11 @@ class NativeBackend:
 
     def enqueue_native_follow_up(self, thread_id: str, text: str, connection: str,
                                  operation_id: str) -> dict:
-        lock = self._queue_locks.setdefault(thread_id, threading.Lock())
-        with lock:
-            from runtime_io import acquire_file_lock
-            lock_name = hashlib.sha256(thread_id.encode('utf-8')).hexdigest()[:32]
-            local_app_data = os.environ.get('LOCALAPPDATA')
-            default_control_root = (Path(local_app_data) / 'CodexCC' if local_app_data else
-                                    Path.home() / 'AppData' / 'Local' / 'CodexCC')
-            control_root = Path(os.environ.get('CC_DATA_DIR') or default_control_root)
-            lock_path = control_root / 'state' / f'visible-queue-{lock_name}.lock'
-            deadline = time.monotonic() + 2.0
-            try:
-                process_lock = acquire_file_lock(lock_path)
-                while process_lock is None and time.monotonic() < deadline:
-                    time.sleep(0.025)
-                    process_lock = acquire_file_lock(lock_path)
-            except OSError:
-                process_lock = None
-            if process_lock is None:
-                return {'state': 'rejected', 'reply': '另一个控制请求正在更新 Desktop 可见队列，这条消息未发送、未排队；请重新查看队列后再发。'}
-            try:
-                return self._enqueue_native_follow_up_locked(thread_id, text, connection, operation_id)
-            finally:
-                os.close(process_lock[0])
-
-    def _enqueue_native_follow_up_locked(self, thread_id: str, text: str, connection: str,
-                                         operation_id: str) -> dict:
-        """Append one message to Desktop's visible native follow-up queue.
-
-        The Desktop IPC accepts a whole snapshot, not an atomic append. Read the
-        current local snapshot, preserve every row, submit once to the verified
-        owner, then read it back. A lost response or changed snapshot is unknown
-        and is never retried through the hidden app-server queue.
-        """
-        catalog = self.catalog
-        if catalog is None or not hasattr(catalog, 'saved_queue_rows'):
-            return {'state': 'rejected', 'reply': '当前无法读取 Desktop 可见待发送列表，未发送、未排队。请在电脑查看。'}
-        try:
-            current = self.snapshot(thread_id, expected_connection=connection)
-            if self._message_route(current) != 'queued':
-                return {'state': 'rejected', 'reply': '对话状态已变化，这条消息未发送、未排队；请重新查询后发送。'}
-            identity, _ = self.probe()
-            if identity != connection or current.get('owner_id') is None:
-                return {'state': 'rejected', 'reply': 'Codex 连接或对话所有者已变化，这条消息未发送、未排队。'}
-            rows = catalog.saved_queue_rows(thread_id)
-            if any(row.get('id') == operation_id for row in rows):
-                return {'state': 'rejected', 'reply': '这条消息编号已存在，未重复加入队列。'}
-            if len(rows) >= 200:
-                return {'state': 'rejected', 'reply': 'Desktop 可见待发送列表已达到上限，这条消息未发送、未排队。'}
-            # The native operation replaces the whole snapshot.  Read again
-            # immediately before dispatch and preserve the exact raw entries.
-            latest_rows = catalog.saved_queue_rows(thread_id)
-            if latest_rows != rows:
-                return {'state': 'rejected', 'reply': 'Desktop 可见队列正在变化，这条消息未发送、未排队；请重新查看队列后重发。'}
-            row = {
-                'id': operation_id,
-                'text': text,
-                'createdAt': int(time.time() * 1000),
-                'submission': {'hostId': 'local', 'status': 'queued'},
-            }
-            next_rows = [*rows, row]
-            result = self.call(
-                thread_id, 'thread-follower-set-queued-follow-ups-state',
-                {'state': {thread_id: next_rows}, 'discardedMessageIds': []}, 1,
-                expected_owner=current['owner_id'], expected_connection=connection,
-            )
-        except (DesktopControlError, OSError, TimeoutError, ValueError, TypeError, KeyError):
-            return {'state': 'rejected', 'reply': '无法核实 Desktop 当前待发送列表，这条消息未发送、未排队。请在电脑查看。'}
-        if result['state'] != 'confirmed':
-            return {'state': result['state'], 'reply':
-                    '已尝试加入 Desktop 可见待发送列表，但没有取得确认；不会改走隐藏队列或自动重试，请查看电脑。'
-                    if result['state'] == 'unknown' else
-                    'Desktop 当前没有接受这条排队消息，未发送、未排队。'}
-        try:
-            from control_actions import normalize_saved_queue
-            entry = None
-            for _ in range(5):
-                after_rows = catalog.saved_queue_rows(thread_id)
-                matches = [item for item in after_rows if item.get('id') == operation_id]
-                preserved = all(any(item == original for item in after_rows) for original in rows)
-                if preserved and len(matches) == 1 and matches[0] == row:
-                    entry = normalize_saved_queue([matches[0]])[0]
-                    break
-                time.sleep(0.05)
-            if entry is None:
-                raise ValueError('queue-readback-mismatch')
-        except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
-            return {'state': 'unknown', 'reply':
-                    'Desktop 已受理排队请求，但回读未能确认这条消息；不会重复排队，请在电脑查看。'}
-        return {'state': 'confirmed', 'mode': 'queued', 'native': True,
-                'queue_id': operation_id, 'entry': entry}
+        # Desktop only exposes whole-snapshot replacement here. An ACP lock
+        # cannot serialize UI edits, so even readback cannot make append safe.
+        return {'state': 'rejected', 'reply':
+                '当前任务运行中，消息未发送、未排队。请等任务空闲后重发；'
+                '需要立即补充要求时，请显式发送“引导 内容”。'}
 
     def preflight_guide_saved_queue_item(self, thread_id: str, entry: dict, catalog: Any,
                                          connection: str | None = None) -> dict:
@@ -381,7 +293,7 @@ class NativeBackend:
 
     def submit_message(self, thread_id: str, text: str, connection: str,
                        operation_id: str, queue_func: Any) -> dict:
-        """Normal QQ text: start idle work or use Desktop's visible busy queue.
+        """Normal QQ text: start idle work; reject busy snapshot replacement.
 
         A lost native confirmation never becomes a second submission via another
         path. The legacy queue callback is retained for compatibility but is
@@ -404,7 +316,7 @@ class NativeBackend:
                 from control_contract import check_queue_contract
                 check_queue_contract(self.process_image or '')
             # Re-read immediately before an idle start. A newly busy owner gets
-            # a queue submission; this is a pre-dispatch choice, never a retry.
+            # a rejection; this is a pre-dispatch check, never a retry.
             current = self.snapshot(thread_id, expected_connection=connection)
             if current['owner_id'] != before['owner_id']:
                 return {'state': 'rejected', 'reply': '对话所有者已变化，未发送。请恢复连接后重新发。'}

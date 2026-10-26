@@ -124,7 +124,7 @@ class ActionRouterTests(unittest.TestCase):
         listing = self.send('队列', quote=card)
         self.assertIn('可能不含服务端', listing)
         selected = self.send('1', quote=listing)
-        self.assertIn('回复“引导”', self.send('状态', quote=selected))
+        self.assertIn('中文排队', self.send('状态', quote=selected))
         guided = self.send('引导', quote=selected, message_id='queue-guide')
         self.assertIn('先删除', guided)
         self.assertEqual(len(self.backend.steered), 1)
@@ -134,6 +134,17 @@ class ActionRouterTests(unittest.TestCase):
         self.assertIn('移除', self.send('删除', quote=selected))
         self.send('删除', quote=selected)
         self.assertEqual(self.backend.removed, [(THREAD_A, 'message-1'), (THREAD_A, 'message-1')])
+        self.assertEqual(self.calls, [])
+
+    def test_queue_cards_support_read_only_navigation_without_dispatch(self):
+        card = self.send('/use ' + THREAD_A)
+        selected = self.send('1', quote=self.send('队列', quote=card))
+        for command in ('队列', '状态'):
+            self.assertIn('中文排队', self.send(command, quote=selected))
+        target = self.send('对话', quote=selected)
+        self.assertIn('对话编号：' + THREAD_A, target)
+        self.assertEqual(self.backend.removed, [])
+        self.assertEqual(self.backend.steered, [])
         self.assertEqual(self.calls, [])
 
     def test_queue_conversion_is_deduplicated_and_old_connection_is_rejected(self):

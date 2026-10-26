@@ -47,13 +47,22 @@ def _parse_time(value: Any) -> datetime:
     return datetime.now(timezone.utc)
 
 
+class RolloutSchemaError(ValueError):
+    pass
+
+
 def _assistant_text_from_response_item(payload: dict[str, Any]) -> str:
     if payload.get("role") != "assistant":
         return ""
     chunks: list[str] = []
-    for content in payload.get("content") or []:
+    content_rows = payload.get('content')
+    if not isinstance(content_rows, list):
+        raise RolloutSchemaError('invalid-message-content')
+    for content in content_rows or []:
         if not isinstance(content, dict):
-            continue
+            raise RolloutSchemaError('invalid-content-part')
+        if any(name in content and not isinstance(content[name], str) for name in ('text', 'output_text')):
+            raise RolloutSchemaError('invalid-content-text')
         text = content.get("text") or content.get("output_text")
         if isinstance(text, str) and text:
             chunks.append(text)
@@ -68,12 +77,15 @@ def parse_rollout_line(
 ) -> list[Signal]:
     record = json.loads(line)
     if not isinstance(record, dict):
-        return []
+        raise RolloutSchemaError('invalid-record')
     observed_at = _parse_time(record.get("timestamp"))
     outer_type = record.get("type")
     payload = record.get("payload")
     if not isinstance(payload, dict):
-        return []
+        raise RolloutSchemaError('invalid-payload')
+    for identity in ('turn_id', 'turnId'):
+        if payload.get(identity) is not None and not isinstance(payload[identity], str):
+            raise RolloutSchemaError('invalid-turn-identity')
 
     common = {
         "observed_at": observed_at,
@@ -85,6 +97,8 @@ def parse_rollout_line(
 
     if outer_type == "session_meta":
         meta_id = payload.get("id")
+        if meta_id is not None and not isinstance(meta_id, str):
+            raise RolloutSchemaError('invalid-session-identity')
         signals.append(
             Signal(
                 SignalKind.SESSION_STARTED,
@@ -195,7 +209,7 @@ def iter_rollout_signals(path: str | Path, *, start_offset: int = 0) -> Iterable
             try:
                 text = raw.decode("utf-8")
                 signals = parse_rollout_line(text, session_id=session_id, transcript_path=str(transcript))
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except (UnicodeDecodeError, json.JSONDecodeError, RolloutSchemaError):
                 continue
             for signal in signals:
                 if signal.kind == SignalKind.SESSION_STARTED and signal.session_id:
