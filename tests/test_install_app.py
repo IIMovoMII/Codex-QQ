@@ -15,6 +15,15 @@ import install_app
 
 
 class InstallWizardTests(unittest.TestCase):
+    def test_first_run_prints_qq_bot_setup_guide(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            install_app.print_qq_bot_setup_guide()
+        text = output.getvalue()
+        for expected in ('q.qq.com', '创建机器人', 'AppID', 'AppSecret',
+                         '开发设置', '沙箱配置', 'QQ 登录密码', 'bot.q.qq.com/wiki'):
+            self.assertIn(expected, text)
+
     def make_formal(self, root, runtime):
         binary = root / install_app.GATEWAY_RELATIVE
         binary.parent.mkdir(parents=True)

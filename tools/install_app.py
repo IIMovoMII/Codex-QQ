@@ -27,6 +27,8 @@ from setup_process import PairingGateway, wait_gateway_ready
 from setup_diagnostics import InstallFailure, record_failure, run_logged
 
 GATEWAY_RELATIVE = Path('vendor/cc-connect/v1.5.0-desktop-control/bin/cc-connect-desktop-control.exe')
+QQ_PLATFORM_URL = 'https://q.qq.com/'
+QQ_BOT_DOCS_URL = 'https://bot.q.qq.com/wiki/'
 
 
 def digest(path: Path) -> str:
@@ -115,6 +117,25 @@ def prepare_files(root: Path, logs: Path | None = None) -> None:
     print('应用启动入口：已就绪')
 
 
+def print_qq_bot_setup_guide() -> None:
+    """Give first-time users the platform steps before asking for secrets."""
+    print(f'''
+第一次使用 QQ 机器人？先在浏览器完成下面步骤；已有机器人可直接从第 3 步开始：
+  1. 打开 QQ 开放平台 {QQ_PLATFORM_URL}，登录或注册并进入控制台。
+  2. 选择“创建机器人”，填写机器人名称、简介等资料，完成平台要求的账号/主体认证。
+  3. 打开刚创建的机器人，在“开发”→“开发设置”（有的页面称“开发管理”）中：
+     - 复制 AppID；
+     - 点击“生成/查看”获取 AppSecret。
+  4. 在“沙箱配置”或“服务范围/内部体验号码”中加入你自己的 QQ 号，开启私信测试；
+     如果平台显示测试成员或消息列表配置，按页面把自己的 QQ 加进去。
+  5. 回到这个安装窗口，按提示粘贴 AppID 和 AppSecret，再选择是否使用沙箱。
+
+AppID 是机器人 ID，AppSecret 是机器人密钥；它们都不是普通 QQ 号或 QQ 登录密码。
+密钥只在本机的隐藏输入框中填写，不要发给智能体、QQ 或 GitHub。
+官方入门说明：{QQ_BOT_DOCS_URL}
+''')
+
+
 def pair(root: Path, runtime: Path, *, ask=input, hidden=getpass.getpass) -> bool:
     state = setup_state(root, runtime)
     if state in ('preparing', 'finalizing'):
@@ -125,8 +146,7 @@ def pair(root: Path, runtime: Path, *, ask=input, hidden=getpass.getpass) -> boo
         print('已有 QQ 绑定，直接保留，不再索取密钥。')
         return True
     if state == 'new':
-        print('\n请在 QQ 开放平台 q.qq.com 创建自己的机器人，并开启私聊测试权限。')
-        print('下面只在本机输入；不要把 AppSecret 发到智能体聊天或 QQ。')
+        print_qq_bot_setup_guide()
         app_id = ask('机器人 AppID：').strip()
         secret = hidden('机器人 AppSecret（输入不显示）：')
         sandbox = ask('平台是否使用沙箱？使用沙箱输入 y；否则直接回车：').strip().lower() == 'y'
