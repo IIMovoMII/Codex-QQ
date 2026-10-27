@@ -12,9 +12,10 @@ LEDGER_PRUNE_INTERVAL = 256
 
 
 class DeliveryLedger:
-    def __init__(self, path: Path, *, pending: Path) -> None:
+    def __init__(self, path: Path, *, pending: Path, retained: tuple[Path, ...] = ()) -> None:
         self.path = path
         self.pending = pending
+        self.retained = tuple(retained)
         self._writes = 0
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as db:
@@ -50,17 +51,20 @@ class DeliveryLedger:
                        (item, time.time()))
         self._writes += 1
         if self._writes >= LEDGER_PRUNE_INTERVAL:
-            self.prune(self.pending)
+            self.prune(self.pending, *self.retained)
             self._writes = 0
 
-    def prune(self, pending: Path) -> None:
-        # Unresolved pending entries keep their facts regardless of age/count.
+    def prune(self, pending: Path, *retained: Path) -> None:
+        # Unresolved pending/dead-letter entries keep their facts regardless of
+        # age/count. A dead-letter file is deliberately retained as an
+        # idempotency tombstone even though it will not be retried automatically.
+        retained_paths = (pending, *self.retained, *retained)
         cutoff = time.time() - LEDGER_RETENTION_SECONDS
         with self.connect() as db:
             rows = db.execute('SELECT item,updated FROM notices ORDER BY updated DESC').fetchall()
             expired = [(item,) for index, (item, updated) in enumerate(rows)
                        if (updated < cutoff or index >= MAX_LEDGER_ROWS)
-                       and not (pending / item).exists()]
+                       and not any((root / item).exists() for root in retained_paths)]
             db.executemany('DELETE FROM notices WHERE item=?', expired)
 
     def import_facts(self, shadowed: set[str], delivered: set[str]) -> None:

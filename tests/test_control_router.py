@@ -196,13 +196,29 @@ class ControlRouterTests(unittest.TestCase):
 
     def test_lazy_bridge_accepts_first_event_after_gateway_and_desktop_ready(self):
         # The real gateway receives this event before starting its ACP child.
-        params = self.request('继续', quote=f'对话编号：{THREAD_A}',
-                              message_id='cold-start-event')
         cold = ControlRouter(ControlStore(Path(self.tmp.name) / 'cold.sqlite'),
                              FakeCatalog(), self.backend,
                              lambda t, text: (self.calls.append((t, text)) or True, ''))
+        token = cold.store.reference('test|qqbot:user|user', 'thread', {'thread_id': THREAD_A})
+        params = self.request('继续', quote=f'引用标识：{token}',
+                              message_id='cold-start-event')
         self.assertIn('已提交', cold.handle(params))
         self.assertEqual(self.calls, [(THREAD_A, '继续')])
+
+    def test_legacy_plain_thread_reference_is_rejected_without_scope(self):
+        params = self.request('继续', quote=f'旧提醒\n对话编号：{THREAD_A}', message_id='legacy-cross-user')
+        params['_meta']['cc_connect']['user_id'] = 'other-member'
+        reply = self.controller.handle(params)
+        self.assertIn('引用信息不完整', reply)
+        self.assertEqual(self.calls, [])
+
+    def test_legacy_notice_is_rejected_in_group_scope_even_for_same_member(self):
+        params = self.request('继续', quote=f'旧提醒\n对话编号：{THREAD_A}', message_id='legacy-group')
+        params['_meta']['cc_connect']['session_key'] = 'qqbot:group-openid'
+        with patch.dict(os.environ, {'CC_SESSION_KEY': 'qqbot:group-openid'}, clear=False):
+            reply = self.controller.handle(params)
+        self.assertIn('引用信息不完整', reply)
+        self.assertEqual(self.calls, [])
 
     def test_bridge_recreation_keeps_live_events_and_receipt_deduplication(self):
         card = self.send('/use ' + THREAD_A)

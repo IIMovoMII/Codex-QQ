@@ -206,10 +206,17 @@ def _parse_observed_at(value: Any) -> datetime:
 def hook_event_to_signals(event: dict[str, Any]) -> list[Signal]:
     name = str(event.get("hook_event_name") or "")
     observed_at = _parse_observed_at(event.get("observed_at"))
+    session_id = str(event.get("session_id") or "") or None
+    turn_id = str(event.get("turn_id") or "") or None
+    # Hook payloads are observational only. Without both identities there is
+    # no safe target for a turn-scoped signal; do not let the reducer guess a
+    # shared placeholder or a timestamp-based turn id.
+    if not session_id or (name not in ("SessionStart", "SessionEnd") and not turn_id):
+        return []
     common = {
         "observed_at": observed_at,
-        "session_id": str(event.get("session_id") or "") or None,
-        "turn_id": str(event.get("turn_id") or "") or None,
+        "session_id": session_id,
+        "turn_id": turn_id,
         "transcript_path": str(event.get("transcript_path") or "") or None,
         "source": "hook",
     }

@@ -46,6 +46,11 @@ class HookBridgeTests(unittest.TestCase):
         stopped = hook_event_to_signals(sanitize_hook_payload({"hook_event_name": "Stop", "session_id": "s", "turn_id": "t", "last_assistant_message": "done"}))
         self.assertEqual([item.kind for item in stopped], [SignalKind.ASSISTANT_MESSAGE, SignalKind.STOP_OBSERVED])
 
+    def test_missing_hook_identity_is_dropped_instead_of_using_a_placeholder(self) -> None:
+        self.assertEqual(hook_event_to_signals({'hook_event_name': 'UserPromptSubmit', 'session_id': 's'}), [])
+        self.assertEqual(hook_event_to_signals({'hook_event_name': 'Stop', 'turn_id': 't'}), [])
+        self.assertEqual(hook_event_to_signals({'hook_event_name': 'SessionStart'}), [])
+
     def test_collector_writes_one_atomic_event(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             path = collect_hook_event('{"hook_event_name":"Stop","session_id":"s","turn_id":"t"}', data_dir=Path(temporary))

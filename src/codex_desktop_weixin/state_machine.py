@@ -13,6 +13,24 @@ from models import Confidence, ErrorCategory, ErrorSummary, Notification, Signal
 MAX_RETAINED_ASSISTANT_CHARS = 16 * 1024
 MAX_RETAINED_ERRORS = 8
 MAX_RETAINED_TERMINAL_TURNS = 512
+_TURN_SCOPED_SIGNALS = frozenset({
+    SignalKind.TURN_STARTED,
+    SignalKind.ACTIVITY,
+    SignalKind.ASSISTANT_MESSAGE,
+    SignalKind.ERROR_OBSERVED,
+    SignalKind.TURN_COMPLETED,
+    SignalKind.TURN_ABORTED,
+    SignalKind.STOP_OBSERVED,
+    SignalKind.PERMISSION_REQUESTED,
+    SignalKind.USER_INPUT_REQUESTED,
+    SignalKind.USER_INPUT_RESOLVED,
+    SignalKind.ASYNC_QUESTION_CREATED,
+    SignalKind.ASYNC_QUESTION_ANSWERED,
+    SignalKind.TOOL_STARTED,
+    SignalKind.TOOL_COMPLETED,
+    SignalKind.PROCESS_STARTED,
+    SignalKind.PROCESS_STOPPED,
+})
 
 
 @dataclass
@@ -222,9 +240,9 @@ class StateMachine:
             runtime.model = context["model"]
 
     def _key(self, signal: Signal) -> tuple[str, str] | None:
-        session = signal.session_id or "unknown-session"
-        turn = signal.turn_id or self.active_turn_by_session.get(session)
-        if not turn:
+        session = signal.session_id
+        turn = signal.turn_id
+        if not session or not turn:
             return None
         return session, turn
 
@@ -317,7 +335,13 @@ class StateMachine:
             self.maintenance = False
             return []
 
-        session = signal.session_id or "unknown-session"
+        # Never invent a shared identity for malformed/old hook payloads. A
+        # missing session or turn cannot be safely associated with the current
+        # task; dropping it is safer than retiring or completing another turn.
+        if not signal.session_id or signal.kind in _TURN_SCOPED_SIGNALS and not signal.turn_id:
+            return []
+
+        session = signal.session_id
         if signal.kind == SignalKind.SESSION_STARTED:
             if signal.observed_at < self.session_watermarks.get(session, datetime.min.replace(tzinfo=timezone.utc)):
                 return []
@@ -353,7 +377,7 @@ class StateMachine:
         if signal.kind == SignalKind.TURN_STARTED:
             if signal.observed_at < self.session_watermarks.get(session, datetime.min.replace(tzinfo=timezone.utc)):
                 return []
-            turn = signal.turn_id or f"unknown-{int(signal.observed_at.timestamp())}"
+            turn = signal.turn_id
             # A Codex session has only one current turn. Old unfinished turns
             # are retired silently instead of retaining stale running state.
             if (session, turn) in self._retired_keys:

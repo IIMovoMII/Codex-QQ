@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -77,6 +79,48 @@ class TailerTests(unittest.TestCase):
             cursor = tailer.cursor_for(transcript)
             self.assertEqual(cursor.offset, transcript.stat().st_size)
             self.assertFalse(cursor.skipping_oversized_line)
+
+    def test_corrupt_cold_row_is_discarded_without_blocking_other_rows(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bad = root / 'bad-rollout.jsonl'; bad.write_text('', encoding='utf-8')
+            good = root / 'good-rollout.jsonl'; good.write_text('', encoding='utf-8')
+            state = root / 'cursors.json'
+            cold = state.with_suffix('.sqlite')
+            db = sqlite3.connect(cold)
+            db.execute('CREATE TABLE cursors(path TEXT PRIMARY KEY, value TEXT NOT NULL, updated REAL NOT NULL)')
+            db.executemany('INSERT INTO cursors VALUES(?,?,?)', [
+                (canonical_path_key(bad), '{broken', time.time()),
+                (canonical_path_key(good), json.dumps({
+                    'offset': 7, 'identity': 1, 'session_id': 'good',
+                    'turn_id': None, 'skipping_oversized_line': False,
+                    'context_incomplete': False, 'needs_context': False,
+                }), time.time()),
+            ])
+            db.commit(); db.close()
+            tailer = IncrementalTailer(state)
+            self.assertIsNone(tailer.cursor_for(bad))
+            self.assertEqual(tailer.cursor_for(good).offset, 7)
+            with patch.object(tailer, 'register_from_start', side_effect=AssertionError('unsafe replay')):
+                tailer.read_new_signals(bad)
+            check = sqlite3.connect(cold)
+            try:
+                self.assertEqual(check.execute('SELECT COUNT(*) FROM cursors').fetchone()[0], 1)
+            finally:
+                check.close()
+
+    def test_corrupt_cold_database_is_quarantined_and_scan_can_continue(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            transcript = root / 'rollout.jsonl'; transcript.write_text('', encoding='utf-8')
+            cold = (root / 'cursors.json').with_suffix('.sqlite')
+            cold.write_bytes(b'not a sqlite database')
+            tailer = IncrementalTailer(root / 'cursors.json')
+            self.assertIsNone(tailer.cursor_for(transcript))
+            with patch.object(tailer, 'register_from_start', side_effect=AssertionError('unsafe replay')):
+                tailer.read_new_signals(transcript)
+            self.assertFalse(cold.exists())
+            self.assertEqual(len(list(root.glob('cursors.sqlite.corrupt-*'))), 1)
 
     @unittest.skipUnless(os.name == "nt", "Windows path aliases only")
     def test_windows_device_prefix_reuses_and_migrates_the_same_cursor(self) -> None:

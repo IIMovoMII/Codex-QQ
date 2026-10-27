@@ -203,6 +203,21 @@ class StateMachineTests(unittest.TestCase):
         self.assertTrue(machine.turns[("s", "late-old")].terminal)
         self.assertEqual([runtime.turn_id for runtime in machine.active_runtimes()], ["new"])
 
+    def test_missing_session_or_turn_identity_is_dropped_fail_closed(self) -> None:
+        machine = StateMachine()
+        events = (
+            Signal(SignalKind.TURN_STARTED, observed_at=BASE, source='test'),
+            Signal(SignalKind.TURN_STARTED, observed_at=BASE, session_id='s', source='test'),
+            Signal(SignalKind.TURN_COMPLETED, observed_at=BASE, session_id='s', source='test',
+                   data={'last_assistant_message': 'must not complete an active turn'}),
+            Signal(SignalKind.ASYNC_QUESTION_CREATED, observed_at=BASE, session_id='s', source='test',
+                   data={'call_id': 'missing-turn'}),
+        )
+        for event in events:
+            self.assertEqual(machine.apply(event), [])
+        self.assertEqual(machine.turns, {})
+        self.assertEqual(machine.active_turn_by_session, {})
+
     def test_terminal_rollout_wins_during_stop_grace(self) -> None:
         machine = self.new_machine()
         machine.apply(signal(SignalKind.STOP_OBSERVED, 1))

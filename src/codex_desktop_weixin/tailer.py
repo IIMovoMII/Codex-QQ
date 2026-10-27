@@ -59,6 +59,9 @@ class IncrementalTailer:
     def __init__(self, state_path: Path) -> None:
         self.state_path = state_path
         self.cursors: dict[str, Cursor] = {}
+        # Keys whose cold metadata was unreadable are rebuilt from a bounded
+        # transcript lookback rather than replayed from byte zero.
+        self._cold_recovery_keys: set[str] = set()
         self.checkpoint: dict | None = None
         self.cold_path = state_path.with_suffix('.sqlite')
         self._load()
@@ -155,6 +158,49 @@ class IncrementalTailer:
         except OSError:
             pass
 
+    def _log_cold_error(self, event: str, error: BaseException | None = None) -> None:
+        """Record cold-index recovery without exposing paths or database text."""
+        value = {'event': event, 'at': time.time()}
+        if error is not None:
+            value['error_type'] = type(error).__name__
+        try:
+            append_json_line(self.state_path.parent.parent / 'logs' / 'tailer-errors.jsonl', value)
+        except OSError:
+            pass
+
+    def _quarantine_cold_index(self, error: BaseException) -> None:
+        """Move an unreadable cold index aside so one bad file cannot wedge scans."""
+        if not self.cold_path.exists():
+            return
+        backup = self.cold_path.with_name(
+            f'{self.cold_path.name}.corrupt-{time.time_ns()}'
+        )
+        try:
+            os.replace(self.cold_path, backup)
+        except OSError as move_error:
+            self._log_cold_error('cold-index-quarantine-failed', move_error)
+            return
+        self._log_cold_error('cold-index-quarantined', error)
+
+    def _discard_cold_row(self, key: str) -> None:
+        """Remove one malformed row, preserving all other cold cursors."""
+        db: sqlite3.Connection | None = None
+        failure: sqlite3.Error | None = None
+        try:
+            db = sqlite3.connect(self.cold_path)
+            with db:
+                db.execute('DELETE FROM cursors WHERE path=?', (key,))
+        except sqlite3.Error as error:
+            failure = error
+        finally:
+            if db is not None:
+                db.close()
+        if failure is not None:
+            # If the row cannot be removed, the index is not trustworthy as a
+            # whole. Keep a recoverable copy and let the next scan rebuild from
+            # the bounded transcript lookback.
+            self._quarantine_cold_index(failure)
+
     def commit(self) -> None:
         """Persist the in-memory cursor after its signals were applied.
 
@@ -178,12 +224,42 @@ class IncrementalTailer:
     def _cold_cursor(self, key: str) -> Cursor | None:
         if not self.cold_path.exists():
             return None
-        db = sqlite3.connect(self.cold_path)
+        db: sqlite3.Connection | None = None
+        failure: sqlite3.Error | None = None
+        row = None
         try:
+            db = sqlite3.connect(self.cold_path)
             row = db.execute('SELECT value FROM cursors WHERE path=?', (key,)).fetchone()
+        except sqlite3.Error as error:
+            failure = error
         finally:
-            db.close()
-        return Cursor(**json.loads(row[0])) if row else None
+            if db is not None:
+                db.close()
+        if failure is not None:
+            self._cold_recovery_keys.add(key)
+            self._quarantine_cold_index(failure)
+            return None
+        if row is None:
+            return None
+        try:
+            value = json.loads(row[0])
+            if not isinstance(value, dict):
+                raise TypeError('invalid-cold-cursor')
+            cursor = Cursor(
+                offset=max(0, int(value.get('offset', 0))),
+                identity=int(value.get('identity', 0)),
+                session_id=str(value.get('session_id') or session_id_from_path(Path(key))),
+                turn_id=value.get('turn_id') if isinstance(value.get('turn_id'), str) else None,
+                skipping_oversized_line=bool(value.get('skipping_oversized_line', False)),
+                context_incomplete=bool(value.get('context_incomplete', False)),
+                needs_context=bool(value.get('needs_context', False)),
+            )
+        except (json.JSONDecodeError, TypeError, ValueError, KeyError) as error:
+            self._cold_recovery_keys.add(key)
+            self._discard_cold_row(key)
+            self._log_cold_error('cold-cursor-row-discarded', error)
+            return None
+        return cursor
 
     def cursor_for(self, path: str | Path, *, promote: bool = True) -> Cursor | None:
         key = self.key_for(path)
@@ -211,7 +287,9 @@ class IncrementalTailer:
         resolved = path.resolve()
         stat = resolved.stat()
         cursor = Cursor(offset=0, identity=int(getattr(stat, "st_ino", 0)), session_id=session_id_from_path(resolved))
-        self.cursors[self.key_for(resolved)] = cursor
+        key = self.key_for(resolved)
+        self._cold_recovery_keys.discard(key)
+        self.cursors[key] = cursor
         self._save()
         return cursor
 
@@ -243,7 +321,9 @@ class IncrementalTailer:
             identity=int(getattr(stat, "st_ino", 0)),
             session_id=session_id_from_path(resolved),
         )
-        self.cursors[self.key_for(resolved)] = cursor
+        key = self.key_for(resolved)
+        self._cold_recovery_keys.discard(key)
+        self.cursors[key] = cursor
         self._save()
         return cursor
 
@@ -257,7 +337,10 @@ class IncrementalTailer:
         stat = resolved.stat()
         cursor = self.cursor_for(resolved)
         if cursor is None:
-            cursor = self.register_from_start(resolved)
+            if key in self._cold_recovery_keys:
+                cursor = self.register_with_lookback(resolved)
+            else:
+                cursor = self.register_from_start(resolved)
         identity = int(getattr(stat, "st_ino", 0))
         if stat.st_size < cursor.offset or (cursor.identity and identity and cursor.identity != identity):
             # Rollout names are unique and append-only.  A shorter/replaced file
@@ -329,7 +412,13 @@ class IncrementalTailer:
                     cursor.session_id = session_id
                 if signal.turn_id and signal.kind in (SignalKind.TURN_STARTED, SignalKind.ACTIVITY):
                     cursor.turn_id = signal.turn_id
-                elif signal.turn_id is None and cursor.turn_id is not None:
+                elif (signal.turn_id is None and cursor.turn_id is not None
+                      and signal.source == 'rollout'):
+                    # Rollout records such as response_item may omit their
+                    # turn_id after an explicit task_started in the same
+                    # append-only transcript. This is a per-transcript
+                    # context recovery, not the shared placeholder identity
+                    # that hook payloads must never receive.
                     signal = Signal(kind=signal.kind, observed_at=signal.observed_at,
                                     session_id=signal.session_id, turn_id=cursor.turn_id,
                                     transcript_path=signal.transcript_path, source=signal.source, data=signal.data)

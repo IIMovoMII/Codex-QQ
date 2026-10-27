@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import json
 import io
+import re
 import tempfile
 import unittest
 from dataclasses import replace
@@ -241,6 +242,40 @@ class NotificationDispatcherTests(unittest.TestCase):
             self.assertEqual(len(sender.messages), 2)
             self.assertEqual(len(list(dispatcher.pending.glob("*.json"))), 0)
             self.assertEqual(len(list(dispatcher.sent.glob("*.json"))), 1)
+
+    def test_pending_queue_enters_dead_letter_at_bounded_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary, patch('notifier.MAX_PENDING_FILES', 2):
+            root = Path(temporary)
+            save_delivery_settings(root / 'settings.json', DeliverySettings(mode='cc-connect'))
+            sender = FakeSender(success=False)
+            dispatcher = NotificationDispatcher(root, sender=sender)
+            for index in range(3):
+                dispatcher.emit(replace(self.note(), turn_id=f't-{index}', dedupe_key=f'event-{index}'))
+            pending = list(dispatcher.pending.glob('*.json'))
+            dead = list(dispatcher.dead_letter.glob('*.json'))
+            self.assertEqual(len(pending), 2)
+            self.assertEqual(len(dead), 1)
+            self.assertEqual(json.loads(dead[0].read_text(encoding='utf-8'))['dead_letter_reason'], 'pending-capacity')
+            self.assertTrue(dispatcher.ledger.contains(dead[0].name))
+            dispatcher.flush(max_items=10)
+            self.assertEqual(len(list(dispatcher.pending.glob('*.json'))), 2)
+
+    def test_bound_notification_contains_scoped_reference_token(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            cc_data = root / 'cc-data'
+            save_delivery_settings(root / 'settings.json', DeliverySettings(
+                mode='cc-connect', project='codex-qq', session='qqbot:user-openid', data_dir=str(cc_data)))
+            sender = FakeSender()
+            dispatcher = NotificationDispatcher(root, sender=sender)
+            dispatcher.emit(self.note())
+            item = json.loads(next(dispatcher.pending.glob('*.json')).read_text(encoding='utf-8'))
+            match = re.search(r'引用标识：([A-Za-z0-9_-]{12})', item['message'])
+            self.assertIsNotNone(match)
+            from control_store import ControlStore
+            store = ControlStore(cc_data / 'control-state.sqlite')
+            self.assertEqual(store.get_reference(
+                'codex-qq|qqbot:user-openid|user-openid', match.group(1))['data']['thread_id'], 's')
 
 
 if __name__ == "__main__":

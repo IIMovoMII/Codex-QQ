@@ -19,6 +19,14 @@ from mobile_copy import notification_heading
 from runtime_io import append_json_line, atomic_write_json
 
 
+# A broken QQ/gateway connection must not turn the local disk into an
+# unbounded retry queue. Dead-letter files remain available for inspection and
+# preserve the delivery ledger's idempotency fact, but are never retried
+# automatically.
+MAX_PENDING_FILES = 1000
+MAX_PENDING_BYTES = 64 * 1024 * 1024
+
+
 @dataclass(frozen=True)
 class DeliverySettings:
     mode: str = "shadow"
@@ -150,7 +158,7 @@ class ShadowNotifier:
         append_json_line(self.log_path, notification.to_dict())
 
 
-def format_notification(notification: Notification) -> str:
+def format_notification(notification: Notification, *, reference_token: str | None = None) -> str:
     lines = [notification_heading(notification.title, notification.state)]
     if notification.message.strip():
         lines.extend(["", notification.message.strip()])
@@ -161,6 +169,8 @@ def format_notification(notification: Notification) -> str:
         # become a normal model task. User chose PC-only async answers.
         footer = ('\n\n引用本条发送“待办”可查看仍有效的提问；请在电脑回答，QQ 仅提醒。'
                   f'\n\n异步问题对话：{notification.session_id}\n提问编号：{notification.question_call_id}')
+        if reference_token:
+            footer += f'\n引用标识：{reference_token}'
         body = '\n'.join(lines)
         budget = max(0, 2000 - len(footer))
         return (body if len(body) <= budget else body[:max(0, budget - 1)] + '…') + footer
@@ -174,7 +184,8 @@ def format_notification(notification: Notification) -> str:
     if route:
         lines = lines[:-2]
     hint = '\n\n引用本条发送“待办”，查询仍有效的问题或审批；原生身份验证或不支持的请求须在电脑处理。' if notification.state in (TurnState.WAITING_INPUT, TurnState.WAITING_APPROVAL) else ''
-    footer = hint + route
+    reference = f'\n引用标识：{reference_token}' if reference_token else ''
+    footer = hint + route + reference
     body = "\n".join(lines)
     budget = max(0, 2000 - len(footer))
     if len(body) > budget:
@@ -192,7 +203,8 @@ class NotificationDispatcher:
         self.sent = data_dir / "outbox" / "sent"
         self.sent_state = data_dir / "outbox" / "sent-state"
         self.failed = data_dir / "outbox" / "failed"
-        for path in (self.logs, self.pending, self.sent, self.sent_state, self.failed):
+        self.dead_letter = data_dir / "outbox" / "dead-letter"
+        for path in (self.logs, self.pending, self.sent, self.sent_state, self.failed, self.dead_letter):
             path.mkdir(parents=True, exist_ok=True)
         self.settings_path = data_dir / "settings.json"
         self.settings = DeliverySettings.load(self.settings_path)
@@ -201,7 +213,10 @@ class NotificationDispatcher:
         self.sender = sender or CCConnectSender(self.settings)
         self._last_local_recovery: float | None = None
         self._local_recovery_cooldown = 60.0
-        self.ledger = DeliveryLedger(data_dir / 'state' / 'delivery.sqlite', pending=self.pending)
+        self._notification_scope = self._derive_notification_scope()
+        self._control_store = self._open_control_store()
+        self.ledger = DeliveryLedger(data_dir / 'state' / 'delivery.sqlite', pending=self.pending,
+                                     retained=(self.dead_letter,))
         # If every durable success write fails, stop further sends until this
         # one fact is saved. Memory remains bounded even during disk failure.
         self._unrecorded_success: tuple[Path, dict] | None = None
@@ -246,7 +261,99 @@ class NotificationDispatcher:
                     except (json.JSONDecodeError, UnicodeError):
                         continue
         self.ledger.import_facts(shadowed, delivered)
-        self.ledger.prune(self.pending)
+        self.ledger.prune(self.pending, self.dead_letter)
+
+    def _derive_notification_scope(self) -> str | None:
+        """Return the configured QQ recipient's exact router scope."""
+        session = self.settings.session.strip()
+        if not session.startswith('qqbot:'):
+            return None
+        user_id = session.rsplit(':', 1)[-1]
+        if not user_id or user_id == session:
+            return None
+        project = self.settings.project.strip() or 'default'
+        return f'{project}|{session}|{user_id}'
+
+    def _open_control_store(self):
+        if not self._notification_scope:
+            return None
+        try:
+            from control_store import ControlStore
+            control_root = Path(self.settings.data_dir) if self.settings.data_dir else self.data_dir
+            return ControlStore(control_root / 'control-state.sqlite')
+        except (OSError, ValueError, sqlite3.Error, json.JSONDecodeError, TypeError):
+            # A notification must still be durable when the optional routing
+            # index is unavailable. It simply carries no actionable token and
+            # the router will fail closed for legacy/plain references.
+            return None
+
+    def _reference_token(self, notification: Notification) -> str | None:
+        if self._control_store is None or not self._notification_scope or not notification.session_id:
+            return None
+        kind = 'async_notice' if notification.state == TurnState.QUESTION_AVAILABLE else 'thread'
+        data = {'thread_id': notification.session_id}
+        if kind == 'async_notice' and notification.question_call_id:
+            data['message_id'] = notification.question_call_id
+        try:
+            return self._control_store.reference(self._notification_scope, kind, data)
+        except (OSError, ValueError, sqlite3.Error, TypeError):
+            return None
+
+    def _pending_entries(self) -> tuple[list[tuple[float, Path, int]], int]:
+        entries: list[tuple[float, Path, int]] = []
+        total = 0
+        for path in self.pending.glob('*.json'):
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            size = max(0, int(stat.st_size))
+            entries.append((float(stat.st_mtime), path, size))
+            total += size
+        return entries, total
+
+    def _dead_letter(self, path: Path, reason: str) -> None:
+        """Move an unsent notice to a bounded, auditable terminal state."""
+        destination = self.dead_letter / path.name
+        try:
+            os.replace(path, destination)
+        except FileNotFoundError:
+            return
+        # The move is the safety boundary. Annotation is best-effort so a
+        # locked/invalid JSON file can still leave pending without being lost.
+        try:
+            value = json.loads(destination.read_text(encoding='utf-8'))
+            if isinstance(value, dict):
+                value['dead_letter_reason'] = reason
+                value['dead_lettered_at'] = datetime.now(timezone.utc).isoformat()
+                atomic_write_json(destination, value)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
+        try:
+            append_json_line(self.delivery_log, {
+                'at': datetime.now(timezone.utc).isoformat(),
+                'item': path.name,
+                'event': 'dead_letter',
+                'reason': reason,
+            })
+        except OSError:
+            pass
+
+    def _enforce_pending_limits(self, *, incoming_bytes: int = 0) -> None:
+        if incoming_bytes > MAX_PENDING_BYTES:
+            raise OSError('notification-outbox-item-too-large')
+        entries, total = self._pending_entries()
+        count = len(entries)
+        if count + (1 if incoming_bytes else 0) <= MAX_PENDING_FILES and total + incoming_bytes <= MAX_PENDING_BYTES:
+            return
+        for _modified, path, size in sorted(entries, key=lambda item: (item[0], item[1].name)):
+            if count + (1 if incoming_bytes else 0) <= MAX_PENDING_FILES and total + incoming_bytes <= MAX_PENDING_BYTES:
+                break
+            self._dead_letter(path, 'pending-capacity')
+            count -= 1
+            total = max(0, total - size)
+        if count + (1 if incoming_bytes else 0) > MAX_PENDING_FILES or total + incoming_bytes > MAX_PENDING_BYTES:
+            raise OSError('notification-outbox-capacity')
 
     @property
     def log_path(self) -> Path:
@@ -274,18 +381,23 @@ class NotificationDispatcher:
                 return
             # The outbox is authoritative. If this atomic write fails, the
             # monitor can roll back its reducer and replay the source record.
-            atomic_write_json(self.pending / name, {
+            reference_token = self._reference_token(notification)
+            item = {
                 "notification": notification.to_dict(),
-                "message": format_notification(notification),
+                "message": format_notification(notification, reference_token=reference_token),
                 "attempts": 0,
                 "next_attempt_at": notification.created_at.isoformat(),
-            })
+            }
+            encoded_size = len(json.dumps(item, ensure_ascii=False, indent=2, sort_keys=True).encode('utf-8'))
+            self._enforce_pending_limits(incoming_bytes=encoded_size)
+            atomic_write_json(self.pending / name, item)
         if not self.ledger.contains(name):
             self.shadow.emit(notification)
             self.ledger.record(name)
 
     def prune(self) -> None:
-        self.ledger.prune(self.pending)
+        self._enforce_pending_limits()
+        self.ledger.prune(self.pending, self.dead_letter)
 
     def _persist_success(self, path: Path, item: dict) -> bool:
         durable = False
@@ -388,6 +500,9 @@ class NotificationDispatcher:
     def flush(self, *, max_items: int = 1) -> int:
         if self.settings.mode != "cc-connect":
             return 0
+        # Bound legacy queues left by an older build before creating the scan
+        # list. New queues are kept below the same limits by emit().
+        self._enforce_pending_limits()
         if self._unrecorded_success is not None:
             path, item = self._unrecorded_success
             if not self._persist_success(path, item):

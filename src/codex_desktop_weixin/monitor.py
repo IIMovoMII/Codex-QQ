@@ -39,9 +39,11 @@ SPOOL_CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
 SENT_OUTBOX_RETENTION = timedelta(days=7)
 FAILED_OUTBOX_RETENTION = timedelta(days=30)
 OBSOLETE_OUTBOX_RETENTION = timedelta(days=30)
+DEAD_LETTER_OUTBOX_RETENTION = timedelta(days=30)
 MAX_SENT_OUTBOX_FILES = 1000
 MAX_FAILED_OUTBOX_FILES = 500
 MAX_OBSOLETE_OUTBOX_FILES = 500
+MAX_DEAD_LETTER_OUTBOX_FILES = 500
 ROTATED_LOG_RETENTION = timedelta(days=30)
 MAX_ROTATED_LOG_FILES = 4
 MAX_ACTIVE_LOG_BYTES = 8 * 1024 * 1024
@@ -366,6 +368,19 @@ class DesktopMonitor:
                     return
             turn_id = str(event.get("turn_id") or "") or None
             hook_signals = hook_event_to_signals(event)
+            if not hook_signals:
+                # Keep only the event class in diagnostics; never retain hook
+                # payloads, paths, prompts, or other private fields.
+                try:
+                    from runtime_io import append_json_line
+                    append_json_line(self.paths["logs"] / "monitor-errors.jsonl", {
+                        "at": datetime.now(timezone.utc).isoformat(),
+                        "stage": "hook-context",
+                        "event": "dropped-incomplete-identity",
+                        "hook_event_name": str(event.get("hook_event_name") or "")[:80],
+                    })
+                except OSError:
+                    pass
             native_terminal = False
             if transcript is not None:
                 native_terminal = self._register_from_hook(transcript, turn_id)
@@ -570,6 +585,7 @@ class DesktopMonitor:
             ("sent", SENT_OUTBOX_RETENTION, MAX_SENT_OUTBOX_FILES),
             ("failed", FAILED_OUTBOX_RETENTION, MAX_FAILED_OUTBOX_FILES),
             ("obsolete", OBSOLETE_OUTBOX_RETENTION, MAX_OBSOLETE_OUTBOX_FILES),
+            ("dead-letter", DEAD_LETTER_OUTBOX_RETENTION, MAX_DEAD_LETTER_OUTBOX_FILES),
         ):
             self._prune_spool_directory(outbox / name, retention=retention, max_files=maximum, now=wall_now)
         marker_dir = outbox / 'sent-state'

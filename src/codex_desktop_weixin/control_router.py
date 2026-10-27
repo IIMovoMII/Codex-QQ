@@ -256,7 +256,7 @@ class ControlRouter:
             data["connection"] = connection
         return self._card(scope, kind, data, "\n".join(lines), ttl=1800)
 
-    def _resolve_quote(self, scope: str, quote: str) -> dict | None:
+    def _resolve_quote(self, scope: str, quote: str, *, allow_private_legacy: bool = False) -> dict | None:
         tokens = REFERENCE.findall(quote)
         if len(tokens) == 1 and quote.rstrip().endswith("引用标识：" + tokens[0]):
             found = self.store.get_reference(scope, tokens[0])
@@ -269,12 +269,22 @@ class ControlRouter:
         if async_notices:
             if len(async_notices) != 1 or async_notices[0].end() != len(quote.rstrip()):
                 raise ValueError('ambiguous-async-notice')
+            if not allow_private_legacy:
+                raise ValueError('legacy-reference-without-scope')
             match = async_notices[0]
             return {'kind': 'async_notice', 'data': {'thread_id': match[1], 'message_id': match[2]}}
         # Legacy notifications have exactly one complete identity as their footer.
         matches = THREAD.findall(quote)
         if len(matches) == 1 and quote.rstrip().endswith(matches[0]):
-            return {"kind": "thread", "data": {"thread_id": matches[0].split("：", 1)[1]}}
+            # A plain thread number carries no QQ user/group scope. Keeping
+            # it for group traffic would let another authorized identity
+            # quote an old reminder and mutate the original user's thread.
+            # The only compatibility exception is a verified private session,
+            # where the gateway session itself is exactly qqbot:<user_id>.
+            # New reminders always include a scoped 引用标识 token.
+            if allow_private_legacy:
+                return {"kind": "thread", "data": {"thread_id": matches[0].split("：", 1)[1]}}
+            raise ValueError("legacy-reference-without-scope")
         if quote:
             raise ValueError("missing-reference")
         return None
@@ -288,7 +298,11 @@ class ControlRouter:
         if help_parts and help_parts[0].lower() in ('帮助', '/help', '/帮助'):
             return help_text(help_parts[1] if len(help_parts) > 1 else ''), 'confirmed'
         try:
-            ref = self._resolve_quote(scope, quote)
+            ref = self._resolve_quote(
+                scope,
+                quote,
+                allow_private_legacy=(meta.get('session_key') == f"qqbot:{meta.get('user_id')}"),
+            )
         except ValueError:
             return "引用信息不完整或已过期，请发送“对话”重新选择；不会猜测目标。", "rejected"
         # A target is valid only for this incoming quotation. Never route an
