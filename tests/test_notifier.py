@@ -260,6 +260,24 @@ class NotificationDispatcherTests(unittest.TestCase):
             dispatcher.flush(max_items=10)
             self.assertEqual(len(list(dispatcher.pending.glob('*.json'))), 2)
 
+    def test_dead_letter_is_terminal_for_repeated_emit_and_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            save_delivery_settings(root / 'settings.json', DeliverySettings(mode='cc-connect'))
+            dispatcher = NotificationDispatcher(root, sender=FakeSender())
+            note = self.note()
+            dispatcher.emit(note)
+            pending = next(dispatcher.pending.glob('*.json'))
+            dispatcher._dead_letter(pending, 'test-terminal')
+            dispatcher.emit(note)
+            self.assertFalse((dispatcher.pending / pending.name).exists())
+            self.assertTrue((dispatcher.dead_letter / pending.name).exists())
+
+            restarted = NotificationDispatcher(root, sender=FakeSender())
+            restarted.emit(note)
+            self.assertFalse((restarted.pending / pending.name).exists())
+            self.assertTrue((restarted.dead_letter / pending.name).exists())
+
     def test_bound_notification_contains_scoped_reference_token(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

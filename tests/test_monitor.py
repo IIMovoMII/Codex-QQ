@@ -108,6 +108,24 @@ class MonitorRaceTests(unittest.TestCase):
             rows = [json.loads(row) for row in monitor.notifier.log_path.read_text(encoding='utf-8').splitlines()]
             self.assertEqual([(row['turn_id'], row['state']) for row in rows], [('recent', 'completed')])
 
+    def test_invalid_rollout_timestamp_does_not_emit_historical_completion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            session_id = '99999999-9999-9999-9999-999999999997'
+            monitor = DesktopMonitor(MonitorConfig(root / 'codex', root / 'runtime'))
+            transcript = monitor.session_root / f'rollout-{session_id}.jsonl'
+            transcript.parent.mkdir(parents=True)
+            meta = json.loads(session_meta(session_id))
+            now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+            meta['timestamp'] = now
+            bad_completion = record({'type': 'task_complete', 'turn_id': 'old',
+                                     'last_agent_message': 'old history'}, timestamp='not-a-time')
+            transcript.write_text(json.dumps(meta) + '\n' + bad_completion, encoding='utf-8')
+
+            monitor._reconcile()
+
+            self.assertFalse(monitor.notifier.log_path.exists())
+
     def test_notification_persistence_failure_rolls_back_state_and_replay_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

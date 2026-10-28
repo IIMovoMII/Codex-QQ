@@ -13,6 +13,7 @@ from typing import Any, Iterator
 
 class ControlStore:
     VERSION = 2
+    MAX_THREAD_REFS_PER_SCOPE = 256
 
     def __init__(self, path: Path, *, legacy_routes: Path | None = None) -> None:
         self.path = path
@@ -126,6 +127,18 @@ class ControlStore:
                 token, scope, kind, encoded,
                 now, now + ttl if ttl is not None else None,
             ))
+            if kind == 'thread' and ttl is None:
+                # Thread cards are durable navigation handles, but an
+                # unbounded history of distinct conversations would grow the
+                # bridge-owned database forever. Keep the newest handles for
+                # each QQ scope and let older cards fail closed.
+                db.execute(
+                    "DELETE FROM refs WHERE scope=? AND kind='thread' AND expires IS NULL "
+                    "AND id NOT IN (SELECT id FROM refs WHERE scope=? AND kind='thread' "
+                    "AND expires IS NULL ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END, "
+                    "created DESC, id DESC LIMIT ?)",
+                    (scope, scope, token, self.MAX_THREAD_REFS_PER_SCOPE),
+                )
         return token
 
     def get_reference(self, scope: str, token: str) -> dict[str, Any] | None:
@@ -193,6 +206,13 @@ class ControlStore:
             db.execute("UPDATE refs SET expires=created+? WHERE expires IS NULL AND kind='thread' AND data LIKE '%\"connection\"%'",
                        (30 * 86400,))
             db.execute("DELETE FROM refs WHERE expires IS NOT NULL AND expires<?", (time.time(),))
+            db.execute(
+                "DELETE FROM refs WHERE kind='thread' AND expires IS NULL AND id IN ("
+                "SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY scope "
+                "ORDER BY created DESC, id DESC) AS rank FROM refs "
+                "WHERE kind='thread' AND expires IS NULL) WHERE rank>?)",
+                (self.MAX_THREAD_REFS_PER_SCOPE,),
+            )
             db.execute("UPDATE receipts SET state='unknown',reply='处理结果未知，不会自动重发。请在电脑核对。',updated=? WHERE state='dispatching' AND updated<?",
                        (time.time(), cutoff))
             db.execute("DELETE FROM receipts WHERE updated<? AND state!='dispatching'", (cutoff,))

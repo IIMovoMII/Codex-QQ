@@ -322,6 +322,22 @@ class ActionPayloadTests(unittest.TestCase):
             self.assertIn('未知', store.begin('scope', 'message-old', time.time()))
             self.assertEqual(store.operation('scope', 'old-action')['state'], 'unknown')
 
+    def test_control_store_bounds_permanent_thread_refs_per_scope(self):
+        with tempfile.TemporaryDirectory() as temp:
+            store = ControlStore(Path(temp) / 'state.sqlite')
+            tokens = []
+            for index in range(store.MAX_THREAD_REFS_PER_SCOPE + 8):
+                tokens.append(store.reference('scope', 'thread', {'thread_id': f'thread-{index}'}))
+            store.prune()
+            with store.connect() as db:
+                count = db.execute(
+                    "SELECT COUNT(*) FROM refs WHERE scope=? AND kind='thread' AND expires IS NULL",
+                    ('scope',),
+                ).fetchone()[0]
+            self.assertEqual(count, store.MAX_THREAD_REFS_PER_SCOPE)
+            self.assertIsNone(store.get_reference('scope', tokens[0]))
+            self.assertIsNotNone(store.get_reference('scope', tokens[-1]))
+
 
 class NativeActionTests(unittest.TestCase):
     def setUp(self):

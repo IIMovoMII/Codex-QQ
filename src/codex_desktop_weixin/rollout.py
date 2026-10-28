@@ -38,13 +38,13 @@ def is_desktop_rollout(path: str | Path) -> bool | None:
     return payload.get("source") == "vscode"
 
 
-def _parse_time(value: Any) -> datetime:
+def _parse_time(value: Any) -> datetime | None:
     if isinstance(value, str) and value:
         try:
             return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
         except ValueError:
             pass
-    return datetime.now(timezone.utc)
+    return None
 
 
 class RolloutSchemaError(ValueError):
@@ -79,6 +79,10 @@ def parse_rollout_line(
     if not isinstance(record, dict):
         raise RolloutSchemaError('invalid-record')
     observed_at = _parse_time(record.get("timestamp"))
+    if observed_at is None:
+        # Never turn an unknown event time into "now": that can make an old
+        # record pass the monitor's not_before boundary and emit a duplicate.
+        raise RolloutSchemaError('invalid-timestamp')
     outer_type = record.get("type")
     payload = record.get("payload")
     if not isinstance(payload, dict):

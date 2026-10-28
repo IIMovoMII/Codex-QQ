@@ -10,7 +10,7 @@ PACKAGE_DIR = Path(__file__).resolve().parents[1] / "src" / "codex_desktop_weixi
 sys.path.insert(0, str(PACKAGE_DIR))
 
 from models import SignalKind
-from rollout import parse_rollout_line
+from rollout import RolloutSchemaError, parse_rollout_line
 
 
 class RolloutParserTests(unittest.TestCase):
@@ -31,6 +31,16 @@ class RolloutParserTests(unittest.TestCase):
         signals = self.parse({"type": "function_call", "name": "request_user_input", "call_id": "c"}, outer="response_item")
         self.assertEqual(signals[0].kind, SignalKind.USER_INPUT_REQUESTED)
         self.assertTrue(signals[0].data["historical"])
+
+    def test_missing_or_invalid_timestamp_is_rejected_instead_of_becoming_now(self) -> None:
+        for timestamp in (None, "not-a-time"):
+            record = {"type": "event_msg", "payload": {
+                "type": "task_complete", "turn_id": "t", "last_agent_message": "old"
+            }}
+            if timestamp is not None:
+                record["timestamp"] = timestamp
+            with self.assertRaises(RolloutSchemaError):
+                parse_rollout_line(json.dumps(record), session_id="s")
 
 
 if __name__ == "__main__":

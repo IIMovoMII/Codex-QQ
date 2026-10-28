@@ -375,6 +375,7 @@ class NotificationDispatcher:
         name = self._item_name(notification)
         if self.settings.mode == "cc-connect":
             if ((self.sent / name).exists() or (self.pending / name).exists()
+                    or (self.dead_letter / name).exists()
                     or (self.sent_state / name).exists()
                     or self.ledger.contains(name, delivered=True)
                     or notification.state == TurnState.QUESTION_AVAILABLE and (self.data_dir / 'outbox' / 'obsolete' / name).exists()):
