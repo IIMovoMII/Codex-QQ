@@ -81,10 +81,14 @@ class ResidentJobTests(unittest.TestCase):
                     k.CloseHandle(job)
                     job = None
                     process.wait(timeout=4)
-                    time.sleep(0.15)
                     if mode == 'direct':
+                        # Job termination is asynchronous on Windows.  Wait for
+                        # the exact app process handle instead of guessing with
+                        # a short sleep before checking the persisted PID.
+                        self.assertEqual(k.WaitForSingleObject(handle, 8000), 0)
                         self.assertIsNone(read_monitor_pid(data))
                     else:
+                        time.sleep(0.15)
                         self.assertEqual(read_monitor_pid(data, require_ready=True), app_pid)
                 finally:
                     if job: k.CloseHandle(job)

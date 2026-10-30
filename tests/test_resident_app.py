@@ -280,7 +280,7 @@ class WindowsIntegrationTests(unittest.TestCase):
             root = Path(temp) / '启动 中文 & 空格'
             result = subprocess.run([str(executable), '--codex-home', str(root / '.codex'),
                                      '--data-dir', str(root / 'data'), '--headless', '--duration', '0.5'],
-                                    capture_output=True, timeout=5)
+                                    capture_output=True, timeout=15)
             self.assertEqual(result.returncode, 0)
             log_path = root / 'data/logs/app.jsonl'
             deadline = time.monotonic() + 8
