@@ -37,7 +37,8 @@ class ActionBackend(FakeBackend):
         self.permission_updates = []
         self.compact_calls = 0
         self.compactions = []
-        self.permissions = {'approvalPolicy': 'on-request', 'sandboxPolicy': {'type': 'readOnly'}}
+        self.permissions = {'approvalPolicy': 'on-request', 'sandboxPolicy': {'type': 'readOnly'},
+                            'activePermissionProfile': None, 'approvalsReviewer': 'user'}
         self.steered = []
         self.queue_guides = []
 
@@ -46,6 +47,7 @@ class ActionBackend(FakeBackend):
 
     def control_state(self, thread_id):
         return {**self.settings, 'owner_id': 'owner', 'requests': copy.deepcopy(self.requests),
+                'requests_known': True, 'permissions_known': True,
                 'permissions': self.permissions, 'settings': {}, 'compactions': self.compactions, 'turn': {}}
 
     def respond_to_request(self, data, text):
@@ -232,7 +234,9 @@ class ActionRouterTests(unittest.TestCase):
         reply = self.send('压缩上下文', quote=card)
         self.assertIn('不等于', reply)
         self.assertIn('不会自动重复', self.send('压缩上下文', quote=reply))
-        self.assertIn('尚未取得', self.send('压缩状态', quote=reply))
+        pending = self.send('压缩状态', quote=reply)
+        self.assertIn('没有新增手动 contextCompaction', pending)
+        self.assertIn('没有再次压缩', pending)
         self.backend.compactions = [{'id': 'compact-1', 'source': 'manual', 'turn_status': 'completed'}]
         self.assertIn('已完成', self.send('压缩状态', quote=reply))
         self.assertEqual(self.backend.compact_calls, 1)
@@ -255,8 +259,81 @@ class ActionRouterTests(unittest.TestCase):
         card = self.send('/use ' + THREAD_A)
         listing = self.send('待办', quote=card)
         self.backend.requests.append(question())
-        self.assertIn('过期', self.send('1', quote=listing))
+        self.assertIn('没有与卡片摘要完全匹配', self.send('1', quote=listing))
         self.assertEqual(self.backend.responded, [])
+
+    def test_bounded_todo_shows_known_async_questions_but_marks_native_requests_unknown(self):
+        card = self.send('/use ' + THREAD_A)
+        self.backend.control_state = lambda thread_id: {
+            'owner_id': 'owner', 'snapshot_complete': False, 'requests': [],
+            'requests_known': False, 'permissions_known': False,
+            'async_questions': [{'message_id': 'ask-1', 'turn_id': TURN,
+                                 'digest': 'question-digest',
+                                 'questions': [{'title': '要继续吗？', 'options': ['继续', '停止']}],
+                                 'indices': [0]}],
+            'async_questions_unverified': False, 'compactions': [], 'turn': {},
+        }
+        listing = self.send('待办', quote=card)
+        self.assertIn('要继续吗', listing)
+        self.assertIn('不能据此认定没有其他待办', listing)
+        detail = self.send('1', quote=listing)
+        self.assertIn('要继续吗', detail)
+        self.assertIn('没有当作正文', self.send('继续', quote=detail))
+        self.assertEqual(self.backend.responded, [])
+
+    def test_bounded_todo_without_async_questions_does_not_claim_list_is_empty(self):
+        card = self.send('/use ' + THREAD_A)
+        self.backend.control_state = lambda thread_id: {
+            'owner_id': 'owner', 'snapshot_complete': False, 'requests': [],
+            'requests_known': False, 'permissions_known': False,
+            'async_questions': [], 'async_questions_unverified': False,
+            'compactions': [], 'turn': {},
+        }
+        reply = self.send('待办', quote=card)
+        self.assertIn('不能判断待办为空', reply)
+        self.assertIn('没有提交答案', reply)
+
+    def test_bounded_permission_view_and_update_fail_with_exact_missing_fields(self):
+        card = self.send('/use ' + THREAD_A)
+        self.backend.control_state = lambda thread_id: {
+            'owner_id': 'owner', 'snapshot_complete': False, 'requests': [],
+            'requests_known': False, 'permissions_known': False,
+            'permissions': {}, 'settings': {}, 'turn': {}, 'compactions': [],
+        }
+        reply = self.send('权限', quote=card)
+        self.assertIn('sandboxPolicy', reply)
+        self.assertIn('没有调用设置更新接口', reply)
+        self.assertEqual(self.backend.permission_updates, [])
+
+    def test_permission_change_requires_every_native_baseline_field(self):
+        card = self.send('/use ' + THREAD_A)
+        for field in ('sandboxPolicy', 'approvalPolicy', 'activePermissionProfile', 'approvalsReviewer'):
+            with self.subTest(field=field):
+                permissions = copy.deepcopy(self.backend.permissions)
+                permissions.pop(field)
+                self.backend.control_state = lambda thread_id, permissions=permissions: {
+                    'owner_id': 'owner', 'snapshot_complete': True, 'requests': [],
+                    'requests_known': True, 'permissions_known': True,
+                    'permissions': permissions, 'settings': {}, 'turn': {}, 'compactions': [],
+                }
+                reply = self.send('权限', quote=card)
+                self.assertIn(field, reply)
+                self.assertIn('没有调用设置更新接口', reply)
+        self.assertEqual(self.backend.permission_updates, [])
+
+    def test_compression_status_for_long_thread_says_which_evidence_is_missing(self):
+        card = self.send('/use ' + THREAD_A)
+        compact_reply = self.send('压缩上下文', quote=card)
+        self.backend.control_state = lambda thread_id: {
+            'owner_id': 'owner', 'snapshot_complete': False, 'requests': [],
+            'requests_known': False, 'permissions_known': False,
+            'permissions': {}, 'settings': {}, 'turn': {'status': 'completed'},
+            'runtime': {'type': 'idle'}, 'compactions': [], 'bounded_idle_safe': True,
+        }
+        status = self.send('压缩状态', quote=compact_reply)
+        self.assertIn('最近一轮摘要没有发现', status)
+        self.assertIn('没有再次压缩', status)
+        self.assertEqual(self.backend.compact_calls, 1)
 
 
 class ActionPayloadTests(unittest.TestCase):
@@ -319,7 +396,7 @@ class ActionPayloadTests(unittest.TestCase):
             store.prune()
             self.assertIsNone(store.get_reference('scope', queue_ref))
             self.assertIsNotNone(store.get_reference('scope', first))
-            self.assertIn('未知', store.begin('scope', 'message-old', time.time()))
+            self.assertIn('本机重启或处理超时', store.begin('scope', 'message-old', time.time()))
             self.assertEqual(store.operation('scope', 'old-action')['state'], 'unknown')
 
     def test_control_store_bounds_permanent_thread_refs_per_scope(self):
@@ -344,7 +421,10 @@ class NativeActionTests(unittest.TestCase):
         self.pipe = FakePipe(result={})
         self.backend = NativeBackend(pipe_factory=lambda: self.pipe, contract_check=lambda: None)
         self.state = {'owner_id': 'desktop-owner', 'model': 'gpt-test', 'effort': 'max', 'settings': {},
-                      'permissions': {}, 'requests': [], 'turn': {}, 'runtime': {}, 'compactions': []}
+                      'permissions': {'sandboxPolicy': {'type': 'readOnly'}, 'approvalPolicy': 'on-request',
+                                      'activePermissionProfile': None, 'approvalsReviewer': 'user'},
+                      'requests': [], 'requests_known': True,
+                      'permissions_known': True, 'turn': {}, 'runtime': {}, 'compactions': []}
         self.backend.snapshot = lambda t, expected_connection=None: copy.deepcopy(self.state)
 
     def test_owner_change_before_dispatch_never_sends_mutation(self):
@@ -360,7 +440,7 @@ class NativeActionTests(unittest.TestCase):
             for payload in ('[]', json.dumps({'threads': []})):
                 path.write_text(payload, encoding='utf-8')
                 with patch('runtime_io.default_data_dir', return_value=root):
-                    self.assertIn('状态暂不可用', backend.status(THREAD))
+                    self.assertIn('control-status.json 格式无效', backend.status(THREAD))
                 self.assertEqual(path.read_text(encoding='utf-8'), payload)
 
     def test_queue_delete_checks_removed_identity_and_consumption_race(self):
@@ -410,7 +490,7 @@ class NativeActionTests(unittest.TestCase):
                 patch.object(self.backend, 'steer') as guide:
             result = self.backend.guide_saved_queue_item(THREAD, entry, catalog, connection='conn')
         self.assertEqual(result['state'], 'unknown')
-        self.assertIn('没有继续发送引导', result['reply'])
+        self.assertIn('没有继续调用 steer', result['reply'])
         call.assert_called_once()
         guide.assert_not_called()
 
@@ -432,7 +512,7 @@ class NativeActionTests(unittest.TestCase):
         self.state['turn'] = {}
         with patch.object(self.backend, 'call', return_value={'state': 'confirmed', 'result': {'ok': True}}) as call:
             result = self.backend.compact(THREAD)
-        self.assertIn('不等于', result['reply'])
+        self.assertIn('不证明压缩完成', result['reply'])
         self.assertEqual(call.call_args.args, (THREAD, 'thread-follower-compact-thread', {}, 1))
 
     def test_unverified_new_contract_never_dispatches(self):
@@ -442,9 +522,9 @@ class NativeActionTests(unittest.TestCase):
         call.assert_not_called()
 
     def test_permissions_readback_partial_write_and_stale_confirmation(self):
-        changes = {'sandboxPolicy': {'type': 'readOnly'}, 'approvalPolicy': 'on-request',
+        changes = {'sandboxPolicy': {'type': 'dangerFullAccess'}, 'approvalPolicy': 'never',
                    'approvalsReviewer': 'user', 'activePermissionProfile': None}
-        baseline = {'digest': signature({}), 'owner_id': 'desktop-owner'}
+        baseline = {'digest': signature(self.state['permissions']), 'owner_id': 'desktop-owner'}
         def respond(*args, **kwargs):
             self.state['settings'] = copy.deepcopy(changes)
             return {'state': 'confirmed', 'result': {'applied': True}}
@@ -468,8 +548,13 @@ class NativeActionTests(unittest.TestCase):
             call.assert_called_once()
         changes = {'sandboxPolicy': {'type': 'dangerFullAccess'}, 'approvalPolicy': 'never',
                    'approvalsReviewer': 'user', 'activePermissionProfile': None}
+        complete = copy.deepcopy(self.state)
+        partial_readback = copy.deepcopy(self.state)
+        partial_readback['permissions'].pop('approvalsReviewer')
+        self.backend.snapshot = Mock(side_effect=[complete, partial_readback])
         with patch.object(self.backend, 'call', return_value={'state': 'confirmed', 'result': {'applied': True}}) as call:
-            self.assertEqual(self.backend.update_permissions(THREAD, changes, {'digest': signature({}), 'owner_id': 'desktop-owner'})['state'], 'unknown')
+            baseline = {'digest': signature(self.state['permissions']), 'owner_id': 'desktop-owner'}
+            self.assertEqual(self.backend.update_permissions(THREAD, changes, baseline)['state'], 'unknown')
             call.assert_called_once()
 
 

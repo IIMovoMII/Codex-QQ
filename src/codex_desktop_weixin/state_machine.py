@@ -533,7 +533,7 @@ class StateMachine:
             elif not runtime.context_complete:
                 note = self._notification(runtime, state=TurnState.RESULT_UNKNOWN,
                     confidence=Confidence.INFERRED, title='Codex 任务已结束，结果未确认',
-                    message='部分任务记录无法恢复或格式异常，请在电脑核对最终结果。')
+                    message='已收到 task_complete 结束事件，但本轮记录曾被截断、跳过损坏行，或旧游标未恢复到轮次开始；不能据此判断成功或失败。助手不会重跑任务，请在目标对话查看最终回复。')
             else:
                 preview = redact_error_text(runtime.last_assistant_message or "任务已经完成，但没有可显示的最终回复。", limit=1200)
                 note = self._notification(

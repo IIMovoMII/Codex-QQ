@@ -19,6 +19,7 @@ _CASES = (
     ('test_mobile_copy', 'MobileCopyTests', 'test_pages_fit_a_mobile_message_without_markdown_or_ids'),
     ('test_mobile_copy', 'HelpRoutingTests', 'test_help_topics_and_quoted_help_never_submit_a_task'),
     ('test_control_router', 'ControlRouterTests', 'test_title_selection_uses_project_and_fixed_snapshot'),
+    ('test_control_router', 'ControlRouterTests', 'test_busy_message_returns_queue_number_and_status_card'),
     ('test_control_router', 'ControlRouterTests', 'test_old_split_rollout_alias_is_canonicalized_before_native_dispatch'),
     ('test_control_router', 'ControlRouterTests', 'test_missing_catalog_row_loads_silently_before_routing_quoted_message'),
     ('test_control_router', 'ControlRouterTests', 'test_duplicate_event_does_not_repeat_but_same_text_new_event_does'),

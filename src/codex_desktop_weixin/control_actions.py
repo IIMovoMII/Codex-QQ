@@ -17,6 +17,20 @@ REQUEST_METHODS = {
     'item/commandExecution/requestApproval': 'thread-follower-command-approval-decision',
     'item/fileChange/requestApproval': 'thread-follower-file-approval-decision',
 }
+PERMISSION_BASELINE_FIELDS = ('sandboxPolicy', 'approvalPolicy',
+                              'activePermissionProfile', 'approvalsReviewer')
+
+
+def permission_values(state: dict) -> dict:
+    current = state.get('permissions') or {}
+    settings = state.get('settings') or {}
+    return {**current, **{key: value for key, value in settings.items()
+                          if key in PERMISSION_BASELINE_FIELDS}}
+
+
+def missing_permission_fields(state: dict) -> list[str]:
+    values = permission_values(state)
+    return [field for field in PERMISSION_BASELINE_FIELDS if field not in values]
 
 
 def signature(value: Any) -> str:

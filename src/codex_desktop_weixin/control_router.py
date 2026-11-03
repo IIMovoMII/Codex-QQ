@@ -16,7 +16,7 @@ from typing import Any, Callable
 from control_backend import NativeBackend
 from control_catalog import LocalCatalog
 from control_store import ControlStore
-from desktop_control import DesktopControlError
+from desktop_control import DesktopControlError, public_error_code
 from mobile_copy import help_text
 
 
@@ -24,7 +24,6 @@ REFERENCE = re.compile(r"^引用标识：([A-Za-z0-9_-]{12})$", re.MULTILINE)
 THREAD = re.compile(r"^对话编号：[A-Za-z0-9_-]{20,100}$", re.MULTILINE)
 ASYNC_NOTICE = re.compile(r'^异步问题对话：([A-Za-z0-9_-]{20,100})\r?\n提问编号：([A-Za-z0-9_-]{1,160})$', re.MULTILINE)
 OFFLINE = "Codex 未启动或当前无法连接。这条指令已作废，不会在恢复后自动执行。请恢复连接后重新发送。"
-UNKNOWN = "指令已发出，但没有收到确认，可能已经执行。不会自动重发，请先查看目标对话。"
 NEEDS_QUOTE = "这条消息没有引用目标对话，未执行。请引用选定对话的回执或任务提醒，再发送指令；也可先发送“对话”查看列表。"
 
 
@@ -41,7 +40,7 @@ class _UnavailableControlStore:
 
 class ControlRouter:
     def __init__(self, store: ControlStore, catalog: Any, backend: Any,
-                 queue_func: Callable[[str, str], tuple[bool, str]],
+                 queue_func: Callable[[str, str], tuple[bool | None, str]],
                  availability_check: Callable[[], bool] | None = None) -> None:
         self.store, self.catalog, self.backend = store, catalog, backend
         self.queue_func = queue_func
@@ -56,7 +55,7 @@ class ControlRouter:
             self.state_unavailable = True
 
     @classmethod
-    def runtime(cls, queue_func: Callable[[str, str], tuple[bool, str]]) -> ControlRouter:
+    def runtime(cls, queue_func: Callable[[str, str], tuple[bool | None, str]]) -> ControlRouter:
         data = Path(os.environ.get("CC_DATA_DIR") or Path(os.environ.get("LOCALAPPDATA", "")) / "CodexCC")
         codex = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
         from runtime_io import default_data_dir
@@ -83,15 +82,15 @@ class ControlRouter:
                 self.store.prune()
                 self._last_prune = time.monotonic()
             except (OSError, sqlite3.Error, ValueError, TypeError):
-                return '本地控制记录暂时无法维护，未执行指令；请稍后重试。'
+                return '未执行指令：本机 control-state.sqlite 的过期记录清理失败；没有改写或重建数据库。请检查磁盘可用空间和助手日志后重试。'
         if self.state_unavailable:
-            return '本机 QQ 控制状态无法安全读取，未执行任何操作；原有状态文件已保留。请检查状态数据库或迁移文件后重试。'
+            return '未执行任何操作：本机 control-state.sqlite 无法打开或版本不受支持；原数据库和迁移文件已保留，没有重建。请检查助手日志中的 control-state-unavailable / schema 错误。'
         if self.availability_check is not None:
             try:
                 if not self.availability_check():
                     return 'QQ 助手未就绪或已退出，这条指令已作废，不会补执行。请在电脑开启应用后重新发送。'
-            except (OSError, ValueError):
-                return '无法核实 QQ 助手状态，未执行；请在电脑核对并重新发送。'
+            except (OSError, ValueError) as error:
+                return f'未执行指令：读取 QQ 助手 READY/PID 状态失败（{type(error).__name__}）。本次事件已作废，不会补执行；请检查托盘助手后重新发送。'
         envelope = params.get("_meta") if isinstance(params, dict) else None
         meta = envelope.get("cc_connect") if isinstance(envelope, dict) else None
         expected = os.environ.get("CC_SESSION_KEY", "")
@@ -118,7 +117,7 @@ class ControlRouter:
             if not math.isfinite(sent_at) or not math.isfinite(gateway_ready) or gateway_ready <= 0 or sent_at <= 0 or sent_at > time.time() + 2:
                 raise ValueError("invalid-event-time")
         except (KeyError, TypeError, ValueError):
-            return "无法确认这条消息的发送时间，指令已作废，请重新发送。"
+            return "未执行：CC Connect 元信息中的 sent_at_ms 或 connection_ready_at_ms 缺失/不是有效时间。该 QQ 事件已作废；请发送一条新消息。"
         # The gateway starts/recreates its ACP child only after receiving a
         # message. Python startup is therefore not an offline boundary: using
         # it would reject every first message. Use the actual QQ READY epoch;
@@ -126,13 +125,13 @@ class ControlRouter:
         if scope not in self._bridge_scopes:
             try:
                 self.store.begin_bridge_session(scope, now=gateway_ready)
-            except (OSError, sqlite3.Error):
-                return '本地控制状态暂不可用，未执行这条指令；没有清空或重建已有状态。'
+            except (OSError, sqlite3.Error) as error:
+                return f'未执行：写入 QQ 网关 READY 边界失败（{type(error).__name__}）；没有清空或重建控制数据库。请检查本机磁盘和助手日志。'
             self._bridge_scopes.add(scope)
         try:
             duplicate = self.store.begin(scope, message_id, sent_at)
-        except (OSError, sqlite3.Error):
-            return '本地控制状态暂不可用，未执行这条指令；没有清空或重建已有状态。'
+        except (OSError, sqlite3.Error) as error:
+            return f'未执行：保存入站消息去重记录失败（{type(error).__name__}）；没有清空或重建控制数据库。请检查本机磁盘和助手日志。'
         if duplicate is not None:
             return duplicate
         outcome = "confirmed"
@@ -148,9 +147,10 @@ class ControlRouter:
                 meta = {**meta, '_desktop_identity': identity}
                 dispatching = True
                 reply, outcome = self._dispatch(scope, meta)
-        except (OSError, TimeoutError):
+        except (OSError, TimeoutError) as error:
             self.store.offline(scope)
-            outcome, reply = ('unknown', UNKNOWN) if dispatching else ('rejected', OFFLINE)
+            outcome, reply = (('unknown', f'处理这条 QQ 指令时 Desktop IPC 超时/断开（{public_error_code(error)}）；原生请求可能已到达，助手不会重放该事件。请在目标对话核对后再发新的操作。')
+                              if dispatching else ('rejected', f'未调用 Desktop 控制接口：连接探测失败（{public_error_code(error)}）。该指令已作废，不会在恢复后补执行；恢复 Codex 连接后重新发送。'))
         except Exception as error:
             # A dispatched mutation can have succeeded. Never transform an exception
             # into an instruction replay. Keep the exception type, not its body.
@@ -162,9 +162,20 @@ class ControlRouter:
                 if 'contract' in str(error) or 'installation-mismatch' in str(error):
                     outcome, reply = 'rejected', '这项操作的原生接口格式已变化，未执行；其他兼容功能和通知继续可用。请更新 QQ 助手的接口适配；不需要固定 Codex 安装版本。'
                 elif str(error).startswith('desktop-capability-source-'):
-                    outcome, reply = 'rejected', '暂时无法读取当前 Codex 的接口声明，这项操作未执行、不会补发。请检查当前应用是否已完成更新；聊天记录未修改。'
+                    outcome, reply = 'rejected', '未执行：从当前 Desktop 进程的 resources/app.asar 中没有读到受支持的 IPC 方法版本表（desktop-capability-source-unavailable）。没有调用写入接口；请检查 Desktop 更新是否完整及助手适配。'
                 elif str(error).startswith('native-app-tools-'):
-                    outcome, reply = 'rejected', '当前 Desktop 的本机工具服务未连接，新操作未执行。请从本任务重载 QQ 桥接以更新环境；已有通知、发送和暂停不受此能力限制。'
+                    code = str(error)
+                    detail = {
+                        'native-app-tools-endpoint-unavailable': '没有找到属于当前 Desktop 进程且能返回 tools/list 的本机管道',
+                        'native-app-tools-read-unavailable': 'read_thread 没有返回成功结果',
+                        'native-app-tools-desktop-identity-mismatch': '本机工具服务的进程身份与当前 Desktop 不一致',
+                        'native-app-tools-invalid-catalog': 'tools/list 返回的工具目录格式无效',
+                        'native-app-tools-ambiguous-catalog': 'tools/list 有重复或无效的工具名',
+                        'native-app-tools-invalid-response': '工具 RPC 没有返回匹配请求 ID 的有效结果',
+                        'native-app-tools-rpc-error': '工具 RPC 返回 error 而非结果',
+                        'native-app-tools-invalid-content': '工具结果不是单条有效 JSON 对象',
+                    }.get(code, '本机工具服务预检失败')
+                    outcome, reply = 'rejected', f'未执行新操作：{detail}（{code}）。请运行助手 doctor 检查 Desktop/桥接连接；没有通过其他路径重发。'
                 elif str(error).startswith('no-client-found') or str(error) in ('owner-mismatch', 'owner-changed-before-dispatch'):
                     outcome, reply = 'rejected', '无法连接该对话的当前窗口：聊天记录存在，但没有可响应的窗口所有者（未载入、切换窗口或正在重连）。请在电脑点开这个对话后重发；本条不会以后补执行。'
                 elif str(error) == 'request-version-mismatch':
@@ -172,12 +183,38 @@ class ControlRouter:
                 elif str(error) in ('frame-too-large', 'frame-too-large-unrecoverable',
                                     'bounded-snapshot-unavailable', 'snapshot-incomplete'):
                     outcome, reply = ('rejected',
-                                      '目标对话状态过大或暂时无法完整核实，未发送、未排队、未执行。'
-                                      '请先在 Desktop 打开该对话后重试。')
+                                      'Desktop follower 完整状态帧超过 8 MiB，且没有返回可用的 read_thread 最近轮次摘要；'
+                                      '本次指令未发送、未排队、未修改权限，也未调用压缩/分支/答复接口。检查目标对话是否仍由本机 Desktop 提供，再查助手日志中的读取错误码。')
+                elif str(error).startswith('bounded-snapshot-'):
+                    code = str(error).removeprefix('bounded-snapshot-')
+                    messages = {
+                        'read-failed': 'read_thread 没有返回成功结果',
+                        'thread-identity-mismatch': 'read_thread 返回的 thread ID/host/kind 与引用目标不一致',
+                        'turn-page-invalid': '最近轮次分页结构不符合接口声明',
+                        'turn-status-unavailable': '最近轮次没有受支持的终态/运行态字段',
+                        'thread-status-unavailable': 'Desktop 未返回 idle/active 状态或 activeFlags 非空',
+                        'status-conflict': 'thread 状态与最近轮次状态互相矛盾',
+                        'working-directory-unavailable': '原生摘要没有返回该对话的工作目录',
+                    }
+                    outcome, reply = ('rejected', f'未执行：Desktop 完整状态帧超过 8 MiB，且 read_thread 摘要{messages.get(code, "校验失败（" + code + ")")}；本次没有发送消息或修改设置。恢复后重新读取目标对话。')
                 else:
-                    outcome, reply = 'unknown', '原生控制状态或返回结果无法核实，不能认定是对话未打开。不会自动重发，请在电脑核对；已有聊天记录未修改。'
+                    code = str(error)
+                    safe_code = code if re.fullmatch(r'[A-Za-z0-9._:-]{1,100}', code) else type(error).__name__
+                    operation = self._operation_label(meta.get('text', ''))
+                    if dispatching:
+                        outcome, reply = ('unknown', f'处理“{operation}”时 Desktop/本机返回错误码 {safe_code}；原生请求可能已到达。'
+                                          '本条事件不会重放。请检查目标对话实际状态，再决定是否发起新操作。')
+                    else:
+                        outcome, reply = ('rejected', f'未执行“{operation}”：Desktop 原生预检失败，错误码 {safe_code}。'
+                                          '没有进入写操作；请按错误码修复连接/接口后重试。')
             else:
-                outcome, reply = "unknown", f"处理结果未确认（{type(error).__name__}），不会自动重发。"
+                operation = self._operation_label(meta.get('text', ''))
+                if dispatching:
+                    outcome, reply = ('unknown', f'处理“{operation}”时发生本机错误 {public_error_code(error)}；原生请求是否到达无法确认。'
+                                      '本事件不会重放。写操作先检查目标对话的实际状态，再决定是否发起新操作。')
+                else:
+                    outcome, reply = ('rejected', f'“{operation}”未进入 Desktop 操作阶段；本机预检失败（{public_error_code(error)}）。'
+                                      '没有发送或修改设置，请查看助手日志后重试。')
         try:
             self.store.finish(scope, message_id, outcome, reply)
         except (OSError, sqlite3.Error):
@@ -195,6 +232,17 @@ class ControlRouter:
             footer = f"\n\n对话编号：{data['thread_id']}"
         footer += f"\n引用标识：{token}"
         return body[:2000 - len(footer)] + footer
+
+    @staticmethod
+    def _operation_label(text: str) -> str:
+        command = text.strip().split(maxsplit=1)[0] if isinstance(text, str) and text.strip() else '指令'
+        return {'继续': '发送新一轮', '发送': '发送新一轮', '/send': '发送新一轮',
+                '引导': '引导当前任务', '暂停': '暂停当前任务', '停止': '暂停当前任务',
+                '待办': '查看或回答待办', '审批': '查看或回答待办', '问题': '查看异步问题',
+                '权限': '读取或修改权限', '压缩上下文': '压缩上下文', '压缩状态': '查询压缩状态',
+                '分支': '创建分支', '确认分支': '创建分支', '改名': '修改对话标题',
+                '删除': '删除队列条目', '队列': '读取待发送队列', '设置': '读取对话设置',
+                '模型': '读取或修改模型', '思考档位': '读取或修改思考档位'}.get(command, command[:24])
 
     def _backend_call(self, name: str, *args: Any, connection: str | None = None) -> Any:
         method = getattr(self.backend, name)
@@ -255,11 +303,11 @@ class ControlRouter:
         try:
             self.backend.ensure_owner(thread_id)
             return '已连接。', 'confirmed'
-        except (OSError, TimeoutError, DesktopControlError):
-            pass
+        except (OSError, TimeoutError, DesktopControlError) as owner_error:
+            owner_detail = f'{type(owner_error).__name__}/{str(owner_error)[:80]}'
         result = self.backend.open_thread(thread_id, connection, str(uuid.uuid4()))
         if result['state'] != 'confirmed':
-            return str(result.get('reply') or '原生对话无法载入，未发送。'), result['state']
+            return str(result.get('reply') or f'未打开对话：当前窗口 owner 检查失败（{owner_detail}），Desktop navigate_to_codex_page 未确认。没有发送任务。'), result['state']
         deadline = time.monotonic() + 3.0
         while True:
             try:
@@ -267,7 +315,8 @@ class ControlRouter:
                 return '已打开并连接。', 'confirmed'
             except (OSError, TimeoutError, DesktopControlError):
                 if time.monotonic() >= deadline:
-                    return '已请求打开，但尚未确认连接。请稍后引用本条回执再发；当前没有发送任务。', 'unknown'
+                    return (f'已调用 Desktop navigate_to_codex_page 打开 thread={thread_id}，但 3 秒内 owner 检查仍失败。'
+                            '没有发送任务；可引用本条重新检查连接，不会自动再次打开或发送。', 'unknown')
                 time.sleep(0.1)
 
     def _selected_thread_card(self, scope: str, row: dict, connection: str) -> tuple[str, str]:
@@ -290,7 +339,7 @@ class ControlRouter:
                    offset: int = 0, connection: str | None = None) -> str:
         lines, part = [title], []
         for row in rows:
-            label = str(row["name"]).replace("\n", " ")[:80] if kind == "projects" else self.catalog.label(row) + " · " + row.get("status", "状态未知")
+            label = str(row["name"]).replace("\n", " ")[:80] if kind == "projects" else self.catalog.label(row) + " · " + row.get("status", "本次列表未读取到状态")
             line = f"{offset + len(part) + 1}. {label}"
             if sum(len(x) + 1 for x in lines) + len(line) > 1550:
                 break
@@ -450,7 +499,7 @@ class ControlRouter:
                 changes = {"effort": option["effort"]}
             return self._change_model_settings(scope, thread_id, changes, ref["data"]["baseline"], meta['_desktop_identity'])
         if kind not in (None, "thread", "project", "settings"):
-            return "这条操作卡片当前不能按普通正文回复，请重新查看对应功能。", "rejected"
+            return f"这张{kind}卡不是可回复的确认/选择卡；本条没有执行操作。请引用对应功能消息重新打开有效卡片。", "rejected"
         command, _, arg = text.partition(" ")
         command, arg = command.lower(), arg.strip()
         if command in ("/forget", "/取消", "取消选择"):
@@ -470,10 +519,10 @@ class ControlRouter:
             project_id = ref["data"]["project_id"] if kind == "project" else None
             rows = self.catalog.threads(count=count, search=arg if command == "搜索" else "", project_id=project_id)
             if not rows:
-                return "没有找到对应的本地对话。", "confirmed"
+                return "本机对话目录中没有匹配项；没有选择或发送到其他对话。检查标题关键词或发送“对话”查看当前索引。", "confirmed"
             budget = time.monotonic() + 5.0
             for r in rows:
-                r["status"] = self.backend.status(r["id"]) if time.monotonic() < budget else "状态未即时核实"
+                r["status"] = self.backend.status(r["id"]) if time.monotonic() < budget else "本次列表查询达到 5 秒限时，未读取此项运行状态"
             return self._list_card(scope, "threads", rows, "搜索结果" if command == "搜索" else "最近对话",
                                    connection=meta['_desktop_identity']), "confirmed"
         if command in ("/use", "/选择"):
@@ -513,8 +562,8 @@ class ControlRouter:
             before = self._backend_call('read_settings', thread_id, connection=meta['_desktop_identity'])
             try:
                 catalog = self.catalog.models()
-            except (OSError, ValueError, KeyError, TypeError):
-                return "不能确认本机当前模型目录，未修改设置。请先在电脑刷新模型列表。", "rejected"
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                return f"未修改设置：读取本地模型/思考档位目录失败（{public_error_code(error)}），没有调用设置更新接口。请在 Desktop 刷新模型列表后重试。", "rejected"
             if arg:
                 parts = arg.split()
                 if command == "模型" and 1 <= len(parts) <= 2:
@@ -536,22 +585,48 @@ class ControlRouter:
                                               catalog["source"], connection=meta['_desktop_identity']), "confirmed"
         if command in ("设置", "/current", "/当前"):
             view = self._backend_call('read_settings', thread_id, connection=meta['_desktop_identity'])
-            stored_sandbox = row.get("sandbox_policy") or "{}"
             try:
-                stored_sandbox = json.loads(stored_sandbox) if isinstance(stored_sandbox, str) else stored_sandbox
-            except ValueError:
-                stored_sandbox = {}
-            permissions = view.get("permissions") or view.get("settings") or {"sandboxPolicy": stored_sandbox, "approvalPolicy": row.get("approval_mode")}
-            sandbox = permissions.get("sandboxPolicy") or {}
-            level = {"dangerFullAccess": "完全访问", "danger-full-access": "完全访问", "disabled": "完全访问", "workspaceWrite": "工作区写入", "workspace-write": "工作区写入", "readOnly": "只读", "read-only": "只读"}.get(sandbox.get("type"), "原生默认")
-            effort = view.get("effort") or row.get("reasoning_effort") or "原生默认"
+                control = self._backend_call('control_state', thread_id, connection=meta['_desktop_identity'])
+            except (OSError, TimeoutError, ValueError, DesktopControlError, AttributeError):
+                control = {'snapshot_complete': False, 'permissions_known': False,
+                           'permissions': view.get('permissions') or {},
+                           'settings': view.get('settings') or {}}
+            permission_settings = control.get('settings') or {}
+            permissions = control.get('permissions') or {}
+            effective = {**permissions, **{k: v for k, v in permission_settings.items()
+                                           if k in ('sandboxPolicy', 'approvalPolicy', 'activePermissionProfile', 'approvalsReviewer')}}
+            if 'sandboxPolicy' not in effective:
+                permission_level = ('read_thread 摘要未提供 sandboxPolicy'
+                                    if control.get('snapshot_complete') is False
+                                    else 'Desktop 未返回 sandboxPolicy')
+            else:
+                sandbox = effective.get('sandboxPolicy')
+                sandbox_type = sandbox.get('type') if isinstance(sandbox, dict) else None
+                permission_level = {"dangerFullAccess": "完全访问", "danger-full-access": "完全访问", "disabled": "完全访问", "workspaceWrite": "工作区写入", "workspace-write": "工作区写入", "readOnly": "只读", "read-only": "只读"}.get(sandbox_type, f'未识别的 sandboxPolicy.type={sandbox_type!r}')
+            if 'approvalPolicy' not in effective:
+                approval = ('read_thread 摘要未提供 approvalPolicy'
+                            if control.get('snapshot_complete') is False
+                            else 'Desktop 未返回 approvalPolicy')
+            else:
+                approval = repr(effective['approvalPolicy'])
+            effort = view.get("effort") or "Desktop 未返回 reasoningEffort"
             return self._card(scope, "thread", {"thread_id": thread_id, "connection": meta['_desktop_identity']},
-                              f"{self.catalog.label(row)}\n模型：{view.get('model') or '原生默认'}\n思考档位：{effort}\n权限：{level}\n审批策略：{permissions.get('approvalPolicy') or '原生默认'}\n运行状态：{self.backend.status(thread_id)}\n模型来自当前窗口；档位和权限采用窗口返回值或后台已保存设置。\nQQ 回复沿用此对话的原生设置。"), "confirmed"
+                              f"{self.catalog.label(row)}\n模型：{view.get('model') or 'Desktop 未返回 model'}\n思考档位：{effort}\n权限：{permission_level}\n审批策略：{approval}\n运行状态：{self.backend.status(thread_id)}\n展示的是当前窗口实际返回的字段，缺失字段不会用配置默认值代替。QQ 回复沿用此对话的原生设置。"), "confirmed"
         if command in ("暂停", "停止", "/pause", "/暂停"):
             if arg:
                 return "暂停指令不需要附加参数。发送普通文字可用“发送 正文”。", "rejected"
             result = self._backend_call('pause', thread_id, connection=meta['_desktop_identity'])
-            return result.get("reply", UNKNOWN), result["state"]
+            reply = result.get('reply')
+            if not isinstance(reply, str) or not reply:
+                state = result.get('state', 'missing')
+                if state == 'unknown':
+                    reply = '已调用 Desktop 原生 interrupt-turn，但暂停适配没有返回说明和 interruptedTurnId；是否停止未确认。不会重试，请检查目标对话当前轮次。'
+                elif state == 'rejected':
+                    reply = 'Desktop 原生 interrupt-turn 在发送前被拒绝；这条暂停没有执行。请查看助手日志中的错误码。'
+                else:
+                    reply = f'暂停适配返回不支持的状态 {state!r}，没有可用的中断结果说明；请查看助手日志。'
+                return reply, state if state in ('unknown', 'rejected') else 'unknown'
+            return reply, result['state']
         payload = "继续" if text in ("继续", "/continue", "/继续") else arg if command in ("发送", "/send", "/发送") else text
         if not payload or len(payload) > 4000:
             return "消息不能为空，且最多允许 4,000 个字符。", "rejected"
@@ -559,9 +634,8 @@ class ControlRouter:
             payload.encode("utf-8", errors="strict")
         except UnicodeEncodeError:
             return "消息包含损坏字符，未发送，请重新输入原文。", "rejected"
-        # Match Desktop's safe boundary: idle/paused starts a new native turn;
-        # the running-task snapshot replacement path is disabled until Desktop
-        # exposes a conditional append/CAS operation.
+        # Idle/paused starts a turn; busy messages append through `codex queue`,
+        # never through Desktop's whole-snapshot replacement method.
         result = self.backend.submit_message(thread_id, payload, meta['_desktop_identity'],
                                              str(uuid.uuid4()), self.queue_func)
         if result['state'] != 'confirmed':
@@ -587,21 +661,22 @@ class ControlRouter:
                            'connection': meta['_desktop_identity']}
                 observed = self.backend.submission_status(receipt, self.catalog, meta['_desktop_identity'])
                 receipt['client_id'] = observed.get('client_id')
-                body = f"{self.catalog.label(row)}\n已提交给 Codex。{status_text(observed)}"
+                body = f"{self.catalog.label(row)}\n已提交给 Codex。\n队列编号：{queue_id}\n{status_text(observed)}"
                 body += '\n\n引用本条回复“状态”查看这一条；回复“删除”仅移除仍在排队的本条消息。'
                 body += '\n此发送回执不支持直接转引导；引用“对话”返回的回执发“队列”，可查看并操作仍可核实的原生队列项。'
                 return self._card(scope, 'submission', receipt, body, ttl=30 * 86400), 'confirmed'
             return self._card(scope, 'thread', {'thread_id': thread_id, 'connection': meta['_desktop_identity']},
-                              f"{self.catalog.label(row)}\n已提交给 Codex，但原生回执没有可核实的消息编号，执行状态未确认；不能据此认定已开始。\n完成或出错后会继续提醒。引用本条发送“队列”可查看当前可见的本地记录；不会重发。"), "confirmed"
-        return UNKNOWN, 'unknown'
+                              f"{self.catalog.label(row)}\nCodex 队列命令返回成功，但没有返回可匹配的队列编号；无法确认这条消息是否入队或开始执行。\n不会重发。请在目标对话检查可见待发送列表和最近消息；确认原消息不存在后再决定是否重发。"), "unknown"
+        return (f'Desktop start-turn 已返回，但助手拿到未支持的发送结果 mode={result.get("mode")!r}。'
+                '没有改走队列或引导；任务可能已开始，不要重发，请检查目标对话最新轮次。'), 'unknown'
 
     def _change_model_settings(self, scope: str, thread_id: str, changes: dict,
                                expected: dict, connection: str) -> tuple[str, str]:
         row = self.catalog.thread(thread_id) or self._reference_thread_row(thread_id)
         try:
             catalog = self.catalog.models()
-        except (OSError, ValueError, KeyError, TypeError):
-            return "模型目录暂不可确认，未修改设置。请在电脑刷新列表。", "rejected"
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            return f"未修改设置：读取本地可选模型/档位目录失败（{public_error_code(error)}）。没有调用设置更新接口；请在 Desktop 刷新模型列表后重试。", "rejected"
         model = changes.get("model", expected.get("model"))
         effort = changes.get("effort", expected.get("effort"))
         option = next((o for o in catalog["options"] if o["model"] == model), None)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import struct
 import time
 import uuid
@@ -32,6 +33,17 @@ QUEUED_FOLLOWUPS_VERSION = 1
 
 class DesktopControlError(Exception):
     pass
+
+
+def public_error_code(error: Any) -> str:
+    """Expose bounded diagnostic codes, never native error bodies or paths."""
+    detail = str(error)
+    if re.fullmatch(r'[A-Za-z0-9._:-]{1,120}', detail):
+        return detail
+    if isinstance(error, OSError):
+        code = getattr(error, 'winerror', None) or error.errno
+        return type(error).__name__ + (f':{code}' if code is not None else '')
+    return type(error).__name__ if not isinstance(error, str) else 'native-error-details-omitted'
 
 
 def encode_frame(message: dict[str, Any]) -> bytes:
@@ -268,17 +280,17 @@ def pause_desktop(thread_id: str, *, expected_connection: str | None = None,
             return True, "已通过 Desktop 原生停止功能暂停本轮；可发送 /continue 继续。"
     except (TimeoutError, OSError) as error:
         if sent:
-            return False, "暂停请求未取得确认，可能已生效；请查看 Desktop。不会自动重试或发送“暂停”消息。"
+            return False, f"interrupt-turn 调用后连接中断（{public_error_code(error)}），没有收到 ok=true 和 interruptedTurnId 回执；暂停可能已生效。不会重试，请查看目标对话是否仍在运行。"
         if isinstance(error, TimeoutError):
             return False, "连接 Desktop 超时，未发送暂停请求。"
         return False, "无法连接正在运行的 Desktop，请确认它已打开。"
     except (DesktopControlError, ValueError, UnicodeError) as error:
         if str(error) == "no-client-found":
             if sent:
-                return False, "暂停接口不可用：窗口状态或接口版本可能已变化，请在 Desktop 检查。"
+                return False, "interrupt-turn 调用后 Desktop 返回 no-client-found；没有成功停止回执。暂停可能已生效，不会重试，请在目标对话查看当前轮次。"
             return False, "该对话当前未被 Desktop 窗口载入，请先在 Desktop 打开它。"
         if str(error) == "request-version-mismatch":
             return False, "Desktop 停止接口版本已变化，暂停未执行，需要更新桥接适配。"
         if sent:
-            return False, "未取得有效的暂停确认，请查看 Desktop；不会自动重试。"
-        return False, "Desktop 本地接口返回了不兼容的数据，未发送暂停请求。"
+            return False, f"interrupt-turn 已调用，但回执缺少有效的 ok=true/轮次编号（{public_error_code(error)}）；暂停可能已生效。不会重试，请查看目标对话的当前轮次。"
+        return False, f"未发送暂停请求：Desktop 初始化或 owner 检查失败（{public_error_code(error)}）。请恢复目标对话的窗口连接后重新发送。"

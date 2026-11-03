@@ -218,7 +218,7 @@ def _codex_command() -> list[str] | None:
     return None
 
 
-def queue_to_desktop(thread_id: str, message: str, *, timeout_seconds: float = 20.0) -> tuple[bool, str]:
+def queue_to_desktop(thread_id: str, message: str, *, timeout_seconds: float = 20.0) -> tuple[bool | None, str]:
     if not valid_thread_id(thread_id):
         return False, "线程编号格式不正确。"
     if not message.strip():
@@ -246,7 +246,7 @@ def queue_to_desktop(thread_id: str, message: str, *, timeout_seconds: float = 2
             check=False,
         )
     except subprocess.TimeoutExpired:
-        return False, "codex queue 超时。"
+        return None, "codex queue 命令超时"
     except OSError as error:
         return False, f"启动 codex queue 失败：{type(error).__name__}。"
     if result.returncode != 0:
@@ -308,8 +308,17 @@ class BridgeServer:
             prefix = f"对话（编号尾部 {_thread_label(str(selected))}）：" if ok else "未能确认暂停："
             return prefix + detail
         ok, detail = self.queue_func(str(selected), payload)
+        if ok is None:
+            return (f"Codex 队列命令超时，消息可能已经排队；结果未确认。不会重发。{detail}"
+                    "请先检查目标对话的可见待发送列表和最近消息。")
         if ok:
-            return f"已排入 Codex Desktop 对话（编号尾部 {_thread_label(str(selected))}）。完成或出错后会继续推送提醒。"
+            from submission_receipts import queue_ack
+            queue_id = queue_ack(detail, str(selected))
+            if not queue_id:
+                return (f"Codex 队列命令对话（编号尾部 {_thread_label(str(selected))}）返回成功，但没有可匹配的队列编号；"
+                        "无法确认这条消息是否入队或开始执行。不会重发，请检查目标对话的可见待发送列表和最近消息。")
+            return (f"已加入 Codex Desktop 可见待发送列表。队列编号：{queue_id}。"
+                    "这只确认消息已排队，尚未确认开始执行；完成或出错后会继续推送提醒。")
         return f"未能排入 Codex Desktop：{detail}"
 
     @staticmethod
