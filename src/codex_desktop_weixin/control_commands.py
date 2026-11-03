@@ -10,7 +10,7 @@ import uuid
 import inspect
 
 from control_actions import SUPPORTED_REQUESTS, describe_request, request_reference, signature
-from desktop_control import DesktopControlError
+from desktop_control import DesktopControlError, public_error_code
 
 
 class ActionCommands:
@@ -30,8 +30,15 @@ class ActionCommands:
             if result.get('retryable') and state == 'rejected':
                 self.r.store.release_operation(self.scope, key)
                 return reply, state
-        except Exception:
-            reply, state = '操作处理结果未知，不会自动重发。请重新查询或在电脑核对。', 'unknown'
+        except Exception as error:
+            action = key.split(':', 1)[0]
+            label = {'submission-delete': '删除已发送回执对应的队列项',
+                     'queue-delete': '删除已选队列项', 'queue-guide': '先删除再引导',
+                     'request': '回答原生问题或审批', 'fork': '创建分支',
+                     'permission-flow': '修改当前对话权限'}.get(action, '执行这张操作卡')
+            reply = (f'{label}时本机发生 {public_error_code(error)}；原生请求是否已到达无法从回执判定。'
+                     '不会自动重试。请先在目标对话核对实际状态，再决定是否发起新操作。')
+            state = 'unknown'
         self.r.store.finish_operation(self.scope, key, state, reply)
         return reply, state
 
@@ -56,9 +63,21 @@ class ActionCommands:
 
     @staticmethod
     def _complete_snapshot_guard(state: dict, what: str = '操作') -> tuple[str, str] | None:
-        if state.get('snapshot_complete') is False:
-            return (f'该对话状态过大，暂时无法完整核实{what}；未执行。'
-                    '请先在 Desktop 打开该对话后重试。', 'rejected')
+        if what == '权限':
+            from control_actions import missing_permission_fields
+            fields = missing_permission_fields(state)
+            if (state.get('snapshot_complete') is False or fields
+                    or not state.get('permissions_known', not fields)):
+                names = ', '.join(fields) if fields else '权限基线完整性未确认'
+                source = ('完整状态帧超过 8 MiB，read_thread 只返回最近一轮摘要'
+                          if state.get('snapshot_complete') is False
+                          else '完整状态缺少必需字段或未标记为完整权限基线')
+                return (f'未生成权限修改卡：{source}；缺少/未确认 {names}。没有调用设置更新接口；请在目标对话设置页核对这些实际值。', 'rejected')
+        if what == '待办' and (state.get('snapshot_complete') is False or not state.get('requests_known')):
+            missing = ('完整状态帧超过 8 MiB；read_thread 摘要没有原生 request ID/参数'
+                       if state.get('snapshot_complete') is False
+                       else 'Desktop 状态没有原生 requests 列表')
+            return (f'未提交答案：{missing}，无法确认卡片对应的请求仍有效。没有调用答复接口；请在 Desktop 处理该请求。', 'rejected')
         return None
 
     def command(self, thread_id: str, command: str, arg: str) -> tuple[str, str] | None:
@@ -78,13 +97,23 @@ class ActionCommands:
             try:
                 baseline = self.r.backend.fork_boundary(thread_id, self.connection)
             except (ValueError, OSError, TimeoutError):
-                return '当前对话或分支边界无法核实，未分支；请恢复连接后重试。', 'rejected'
+                return '未创建分支：读取 Desktop 最近完成轮次时连接中断或没有返回数据；没有发送分支请求。检查 Desktop 连接后重新查看“分支”范围。', 'rejected'
             except DesktopControlError as error:
-                if str(error) == 'snapshot-incomplete':
-                    return '该对话状态过大，暂时无法完整核实分支边界；未分支。请先在 Desktop 打开该对话后重试。', 'rejected'
-                return '目前只允许空闲、最近一轮已完成且无自动目标的对话分支。原生边界尚无法核实时，请先在电脑打开并核对对话。', 'rejected'
-            except Exception:
-                return '目前只允许空闲、最近一轮已完成且无自动目标的对话分支。原生边界尚无法核实时，请先在电脑打开并核对对话。', 'rejected'
+                replies = {
+                    'fork-goal-and-request-metadata-unavailable': ('未创建分支：Desktop 完整状态帧超过 8 MiB；read_thread 能确认最近轮次，但不返回 threadGoal 和原生待处理请求列表，'
+                                                                  '无法确认源对话没有自动目标或待处理请求。没有创建分支。'),
+                    'fork-goal-metadata-unavailable': '未创建分支：Desktop 没有在完整状态中提供 threadGoal 字段，无法确认源对话没有自动目标。',
+                    'fork-request-metadata-unavailable': '未创建分支：Desktop 没有返回 requests 列表，无法确认源对话没有待处理审批。没有调用 fork。',
+                    'fork-source-has-active-goal': '未创建分支：源对话仍有关联的自动目标；没有创建新对话。',
+                    'fork-source-has-unconfirmed-submission': '未创建分支：源对话存在尚未确认结果的提交；没有创建新对话。',
+                    'fork-source-has-pending-request': '未创建分支：源对话存在待处理的问题或审批；没有创建新对话。',
+                    'fork-source-not-idle-at-completed-turn': '未创建分支：源对话不是“空闲且最近一轮已完成”；没有创建新对话。',
+                    'fork-latest-turn-changed-during-read': '未创建分支：读取期间最近完成轮次发生变化；没有创建新对话。请重新查看分支范围。',
+                    'latest-fork-source-not-idle-or-has-goal': '未创建分支：源对话仍在运行、存在自动目标或有待处理请求。',
+                }
+                return replies.get(str(error), f'未创建分支：Desktop 没有确认源对话空闲且最近一轮已完成（校验码 {public_error_code(error)}）。没有调用 fork；请打开目标对话完成恢复后重新查看分支范围。'), 'rejected'
+            except Exception as error:
+                return f'未创建分支：本机分支预检失败（{type(error).__name__}）；没有创建新对话。请检查助手日志后再试。', 'rejected'
             row = self.r.catalog.thread(thread_id)
             stamp = baseline['boundary'].get('completed_at')
             from datetime import datetime
@@ -116,9 +145,7 @@ class ActionCommands:
                               '本地已保存的排队记录（可能不含服务端队列；状态以原生处理为准）'), 'confirmed'
         if command in ('待办', '问题', '审批'):
             state = self._backend_call('control_state', thread_id, connection=self.connection)
-            guarded = self._complete_snapshot_guard(state, '待办')
-            if guarded:
-                return guarded
+            incomplete = state.get('snapshot_complete') is False or not state.get('requests_known')
             entries, unsupported = [], int(bool(state.get('async_questions_unverified')))
             for request in state['requests'][:30]:
                 try:
@@ -135,10 +162,21 @@ class ActionCommands:
                                 **{k: batch[k] for k in ('message_id', 'turn_id', 'digest')},
                                 'summary': '异步问题（仅查看）：' + batch['questions'][batch['indices'][0]]['title'][:90]})
             if not entries:
-                return '没有可通过 QQ 回答的待办。' + ('未知请求、身份验证、权限授权或登录问题请在电脑处理。' if unsupported else '原请求可能已经处理或结束。'), 'confirmed'
+                if incomplete:
+                    reason = ('read_thread 最近轮次摘要没有 Desktop 原生待办/审批 request ID 和参数'
+                              if state.get('snapshot_complete') is False
+                              else 'Desktop 完整状态没有原生 requests 列表')
+                    return (f'没有发现可显示的异步问题；{reason}，因此不能判断待办为空。没有提交答案；请在 Desktop 查看该对话的待处理请求。', 'rejected')
+                if unsupported:
+                    return '当前没有可由 QQ 答复的待办；Desktop 另有未支持的请求或无法安全显示的问题内容。没有提交答案，请在电脑查看该对话的待办/审批列表。', 'confirmed'
+                return '当前 Desktop 原生 requests 列表为空，没有待答问题或审批。', 'confirmed'
             note = '当前待办；引用回复序号打开问题或审批。'
             if unsupported:
                 note += '\n另有不支持的请求，请在电脑处理。'
+            if incomplete:
+                reason = ('read_thread 摘要未提供' if state.get('snapshot_complete') is False
+                          else '完整状态未包含')
+                note += f'\n以上只包含最近轮次中可验证的异步问题；{reason} Desktop 原生 requests 列表，不能据此认定没有其他待办。'
             return self._list('request_list', thread_id, entries, note), 'confirmed'
         if command == '权限':
             state = self._backend_call('control_state', thread_id, connection=self.connection)
@@ -179,13 +217,15 @@ class ActionCommands:
 
     @staticmethod
     def _permissions(state: dict) -> dict:
-        fields = ('sandboxPolicy', 'approvalPolicy', 'permissions', 'activePermissionProfile', 'approvalsReviewer')
-        return {**(state.get('permissions') or {}), **{k: v for k, v in (state.get('settings') or {}).items() if k in fields}}
+        from control_actions import permission_values
+        return permission_values(state)
 
     @staticmethod
     def permission_label(value: dict) -> str:
-        label = {'readOnly': '只读', 'workspaceWrite': '工作区写入', 'dangerFullAccess': '完全访问'}.get((value.get('sandboxPolicy') or {}).get('type'), '当前原生权限')
-        return label + '；审批：' + str(value.get('approvalPolicy') or '原生默认')
+        sandbox = value.get('sandboxPolicy') or {}
+        label = {'readOnly': '只读', 'workspaceWrite': '工作区写入', 'dangerFullAccess': '完全访问'}.get(
+            sandbox.get('type'), '未返回 sandboxPolicy' if 'sandboxPolicy' not in value else '未识别的 sandboxPolicy.type=' + str(sandbox.get('type')))
+        return label + '；审批：' + str(value.get('approvalPolicy') or '未返回 approvalPolicy')
 
     def _list(self, kind: str, thread_id: str, entries: list[dict], title: str, offset: int = 0) -> str:
         lines, shown = [title], []
@@ -251,15 +291,20 @@ class ActionCommands:
                                             'connection': self.connection,
                                             'operation_id': uuid.uuid4().hex},
                                  f"待发送记录：{entry['summary']}\n状态：{self.queue_status(entry['status'])}\n回复“引导”会先删除这条排队消息，再把相同正文引导给当前运行任务；回复“删除”只移除它。"), 'confirmed'
+            if entry.get('kind') == 'async_question':
+                state = self._backend_call('control_state', thread_id, connection=self.connection)
+                if state.get('owner_id') != entry.get('owner_id'):
+                    return (f'未显示异步问题：提醒卡绑定 owner={entry.get("owner_id")}，当前 owner={state.get("owner_id")}。'
+                            '没有回答或发送任务；请在当前对话重新查看待办。', 'rejected')
+                return self._async_card(entry, state)
             state = self._backend_call('control_state', thread_id, connection=self.connection)
             guarded = self._complete_snapshot_guard(state, '待办')
             if guarded:
                 return guarded
-            if entry.get('kind') == 'async_question':
-                return self._async_card(entry, state)
             request = self._find_request(entry, state)
             if request is None:
-                return '原问题或审批已过期，请重新查看待办。', 'rejected'
+                return (f'未显示待办 request ID={entry.get("request_id")}、method={entry.get("method")}：'
+                        '当前 Desktop requests 列表中没有与卡片摘要完全匹配的记录。没有提交答案；请重新查看待办。', 'rejected')
             return self.card('request', entry, describe_request(request)), 'confirmed'
         if kind == 'queued':
             entry = data['entry']
@@ -289,12 +334,13 @@ class ActionCommands:
             return '这项操作来自旧连接，已过期。请重新查看对应选项或待办。', 'rejected'
         if kind == 'async_question':
             state = self._backend_call('control_state', thread_id, connection=self.connection)
-            guarded = self._complete_snapshot_guard(state, '待办')
-            if guarded:
-                return guarded
             current = self._async_find(data, state)
             if current is None:
-                return '这批异步问题已回答、结束或发生变化，请重新查看待办；未发送新任务。', 'rejected'
+                if state.get('async_questions_unverified') or state.get('snapshot_complete') is False:
+                    return ('没有显示这张卡对应的异步问题：read_thread 只含最近一轮摘要，缺少完整请求历史或问题答案状态。'
+                            '没有提交答案或发送任务；请在 Desktop 打开该对话查看原问题。', 'rejected')
+                return (f'没有显示这张卡对应的问题 ID={data.get("message_id")}、轮次={data.get("turn_id")}；'
+                        '该问题可能已回答、结束或被新一轮取代。没有提交答案；请重新查看待办。', 'rejected')
             if text in ('待办', '问题'):
                 return self._async_card(data, state)
             return '这批是异步问题，请在电脑回答；按你的选择，QQ 只提醒和查看。没有当作正文、引导或新任务发送。', 'rejected'
@@ -308,9 +354,16 @@ class ActionCommands:
         if kind == 'request':
             # Validate input before claiming: a typo must not consume the request.
             state = self._backend_call('control_state', thread_id, connection=self.connection)
+            guarded = self._complete_snapshot_guard(state, '待办')
+            if guarded:
+                return guarded
+            if state.get('owner_id') != data.get('owner_id'):
+                return (f'未提交答案：该卡绑定窗口={data.get("owner_id")}，当前窗口={state.get("owner_id")}。'
+                        '请重新查看当前对话的待办。', 'rejected')
             request = self._find_request(data, state)
             if request is None:
-                return '原问题或审批已处理、过期或变化，未发起新任务。', 'rejected'
+                return (f'未提交答案：当前 requests 列表中没有唯一匹配 request ID={data.get("request_id")}、'
+                        f'method={data.get("method")} 和卡片摘要的原请求；它可能已处理、过期或重复。没有发送新任务。', 'rejected')
             from control_actions import request_payload
             try:
                 request_payload(request, text)
@@ -358,16 +411,32 @@ class ActionCommands:
         if kind == 'compaction':
             if text != '压缩状态':
                 return '本条用于查询压缩结果，请引用回复“压缩状态”；不会自动重复压缩。', 'rejected'
-            state = self._backend_call('control_state', thread_id, connection=self.connection)
+            try:
+                state = self._backend_call('control_state', thread_id, connection=self.connection)
+            except (OSError, TimeoutError, ValueError, DesktopControlError) as error:
+                return (f'未取得压缩状态：读取 Desktop follower/read_thread 失败（{type(error).__name__}）。'
+                        '没有再次调用压缩；连接恢复后重新引用本卡查询。', 'unknown')
             if state['owner_id'] != data['owner_id']:
-                return '窗口所有者已变化，压缩结果未确认。请在电脑检查。', 'unknown'
+                return ('压缩状态不能沿用：查询卡属于旧 Desktop 窗口，当前窗口 owner 已变化。'
+                        '没有再次压缩；请引用当前对话卡重新查询。', 'unknown')
             previous = {(x.get('id'), x.get('turn_id')) for x in data['baseline']}
             fresh = [x for x in state['compactions'] if x.get('id') and (x.get('id'), x.get('turn_id')) not in previous and x.get('source') == 'manual']
             if fresh and fresh[-1].get('turn_status') == 'completed':
-                return '看到新的原生手动压缩记录且对应轮次已完成；原生入口没有操作编号，不能严格证明是本次 QQ 压缩的结果。请结合电脑状态确认。', 'unknown'
+                item = fresh[-1]
+                return (f'Desktop 历史中出现新的手动压缩记录（item={item["id"]}，轮次={item.get("turn_id")}）且轮次已完成。'
+                        '原生接口没有操作编号，无法确认是否由本张 QQ 卡触发；请以电脑中的压缩记录为准。', 'unknown')
             if fresh and fresh[-1].get('turn_status') in ('failed', 'interrupted'):
-                return '原生压缩失败或被中断，请在电脑查看错误；未自动修历史或重试。', 'confirmed'
-            return '尚未取得新的手动压缩终态记录；不把等待时间当作成功。请稍后查询或查看电脑。', 'unknown'
+                item = fresh[-1]
+                return (f'Desktop 手动压缩记录 item ID={item.get("id")} 对应轮次状态={fresh[-1].get("turn_status")}；'
+                        '压缩没有完成。未修复历史或自动重试，请在电脑查看错误。', 'confirmed')
+            if state.get('snapshot_complete') is False:
+                return ('最近一轮摘要没有发现新的手动 contextCompaction 终态记录；摘要不含完整压缩历史，'
+                        'Desktop 也没有返回可关联本次请求的操作编号。没有再次压缩；请在 Desktop 查看该对话当前轮次和压缩记录。', 'unknown')
+            turn = state.get('turn') or {}
+            runtime = (state.get('runtime') or {}).get('type') or '缺失'
+            return (f'自查询卡片建立后，Desktop follower 状态没有新增手动 contextCompaction 终态记录；'
+                    f'当前 thread={runtime}、turn={turn.get("status", "缺失")}。没有再次压缩；若轮次仍运行，等结束后重查；'
+                    '若已空闲，请在电脑查看压缩错误。', 'unknown')
         return None
 
     def _async_find(self, data: dict, state: dict) -> dict | None:
@@ -381,15 +450,19 @@ class ActionCommands:
         from async_questions import describe
         batch = self._async_find(data, state)
         if batch is None:
-            return '原异步问题已回答、结束或变化，请重新查看待办。', 'rejected'
+            return (f'没有显示问题 ID={data.get("message_id")}、轮次={data.get("turn_id")}：当前原生问题列表没有相同摘要的待答记录。'
+                    '没有提交答案或发送任务，请重新查看待办。', 'rejected')
         body = '异步问题（仅查看，不会暂停当前任务）\n' + describe(batch['questions'], batch['indices'])
         body += '\n\n请回电脑回答，QQ 只提醒和查看。直接回复此卡片不会发送新任务；引用回复“待办”可重新核对。'
         return self.card('async_question', data, body), 'confirmed'
 
     def _fork(self, data: dict) -> dict:
         source = self.r.catalog.thread(data['thread_id'])
-        if source is None or self._project_identity(source) != data['source_project']:
-            return {'state': 'rejected', 'reply': '源对话的项目归属已变化或无法核实，未分支。请重新查看分支范围。'}
+        if source is None:
+            return {'state': 'rejected', 'reply': f'未创建分支：本地目录没有源对话 {data["thread_id"]} 的项目行，无法检查其项目归属。没有调用 fork；请刷新“对话”后重新查看分支范围。'}
+        current_project = self._project_identity(source)
+        if current_project != data['source_project']:
+            return {'state': 'rejected', 'reply': f'未创建分支：源对话项目归属已从 {data["source_project"]} 变为 {current_project}。没有调用 fork；请重新查看分支范围。'}
         result = self.r.backend.fork_latest(data['thread_id'], data['baseline'],
                                             self.connection, data['operation_id'])
         ident = result.get('thread_id')
@@ -422,4 +495,5 @@ class ActionCommands:
     @staticmethod
     def queue_status(value: str) -> str:
         return {'queued': '待发送', 'pending': '准备发送', 'sending': '正在提交',
-                'outcome-unknown': '提交结果未知'}.get(value, '原生状态尚未识别')
+                'outcome-unknown': f'提交结果待核实（本机队列状态={value!r}，未重发）'}.get(
+                    value, f'未知本机队列状态={value!r}；没有据此重发')

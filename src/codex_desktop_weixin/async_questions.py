@@ -112,7 +112,7 @@ def notification(signal: Signal, *, turn_id: str, model: str = '') -> Notificati
     call = signal.data.get('call_id')
     if not signal.session_id or not isinstance(call, str) or not CALL_ID.fullmatch(call):
         return None
-    body = describe(signal.data.get('questions') or []) or '异步问题的格式尚未核实或包含敏感项，请在电脑查看。'
+    body = describe(signal.data.get('questions') or []) or '已收到异步提问工具调用，但未取得符合格式的题目和选项；QQ 不显示未通过解析或敏感项检查的原始工具内容。请在该对话的电脑端提问卡查看原问题。'
     body += '\n\n请回电脑打开这个对话回答。任务可能仍在工作，这不是暂停通知；QQ 只提醒，不提交这类答案。'
     return Notification(session_id=signal.session_id, turn_id=turn_id,
                         state=TurnState.QUESTION_AVAILABLE, confidence=Confidence.CERTAIN,

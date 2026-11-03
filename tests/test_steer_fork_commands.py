@@ -106,13 +106,13 @@ class CommandTests(unittest.TestCase):
         with patch.object(self.backend, 'probe', return_value=('changed-process', 1.0)):
             self.assertIn('旧连接', self.send('确认分支', quote=confirm))
         with patch.object(self.backend, 'fork_boundary', side_effect=DesktopControlError('unavailable')):
-            self.assertIn('空闲', self.send('分支', quote=card))
+            self.assertIn('没有确认源对话空闲且最近一轮已完成', self.send('分支', quote=card))
         self.assertEqual(self.backend.forked, [])
 
     def test_changed_source_project_rejects_confirmation_without_fork(self):
         confirm = self.send('分支', quote=self.send('/use ' + THREAD_B))
         self.controller.catalog.rows[THREAD_B]['project_name'] = '改了归属'
-        self.assertIn('项目归属已变化', self.send('确认分支', quote=confirm))
+        self.assertIn('源对话项目归属已从', self.send('确认分支', quote=confirm))
         self.assertEqual(self.backend.forked, [])
 
     def test_child_project_mismatch_after_creation_is_unknown_without_send_card(self):

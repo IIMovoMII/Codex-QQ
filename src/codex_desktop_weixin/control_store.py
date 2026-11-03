@@ -62,6 +62,20 @@ class ControlStore:
                     db.executemany("INSERT OR IGNORE INTO legacy_selections VALUES(?,?)", legacy_value.items())
                 db.execute("INSERT INTO meta VALUES('legacy_import','1')")
 
+    @staticmethod
+    def _operation_unknown_reply(key: str) -> str:
+        prefix = key.split(':', 1)[0]
+        action = {
+            'submission-delete': '删除发送回执对应的队列消息',
+            'queue-delete': '删除所选队列消息',
+            'queue-guide': '删除队列消息并引导当前任务',
+            'request': '回答原生问题或审批',
+            'fork': '创建对话分支',
+            'permission-flow': '修改对话权限',
+        }.get(prefix, '执行这张操作卡')
+        return (f'本机记录显示“{action}”在上次处理期间中断；原生调用可能未发出，也可能已受理。'
+                '不会自动重试。请先检查目标对话的实际状态，再决定是否发起新操作。')
+
     def begin_bridge_session(self, scope: str, *, now: float | None = None) -> float:
         """Record the QQ gateway's ready boundary for this bridge scope.
 
@@ -155,7 +169,8 @@ class ControlStore:
             db.execute("BEGIN IMMEDIATE")
             row = db.execute("SELECT state,reply FROM receipts WHERE scope=? AND message_id=?", (scope, message_id)).fetchone()
             if row:
-                return row["reply"] or "这条指令已接收，但结果尚未确认；不会重复执行。"
+                return row["reply"] or (f'QQ 消息 {message_id} 正在由另一请求处理；本次没有再次分派。'
+                                        '稍后查询该条回执，不要重复提交相同消息。')
             db.execute("INSERT INTO receipts VALUES(?,?,?,'dispatching','',?)", (scope, message_id, sent_at, now))
         return None
 
@@ -213,11 +228,14 @@ class ControlStore:
                 "WHERE kind='thread' AND expires IS NULL) WHERE rank>?)",
                 (self.MAX_THREAD_REFS_PER_SCOPE,),
             )
-            db.execute("UPDATE receipts SET state='unknown',reply='处理结果未知，不会自动重发。请在电脑核对。',updated=? WHERE state='dispatching' AND updated<?",
+            db.execute("UPDATE receipts SET state='unknown',reply='本机重启或处理超时后，上一条 QQ 指令仍无完成回执；对应的 Desktop 操作可能已到达。助手不会重放该事件，请先检查目标对话的实际状态。',updated=? WHERE state='dispatching' AND updated<?",
                        (time.time(), cutoff))
             db.execute("DELETE FROM receipts WHERE updated<? AND state!='dispatching'", (cutoff,))
-            db.execute("UPDATE operations SET state='unknown',reply='操作结果未知，不会自动重发。请在电脑核对。',updated=? WHERE state='dispatching' AND updated<?",
-                       (time.time(), cutoff))
+            stale = db.execute("SELECT scope,key FROM operations WHERE state='dispatching' AND updated<?",
+                               (cutoff,)).fetchall()
+            for item in stale:
+                db.execute("UPDATE operations SET state='unknown',reply=?,updated=? WHERE scope=? AND key=? AND state='dispatching'",
+                           (self._operation_unknown_reply(item['key']), time.time(), item['scope'], item['key']))
             db.execute("DELETE FROM operations WHERE updated<?", (cutoff,))
             db.execute("DELETE FROM bridge_sessions WHERE started<?", (cutoff,))
 
@@ -228,7 +246,7 @@ class ControlStore:
             row = db.execute('SELECT state,reply FROM operations WHERE scope=? AND key=?', (scope, key)).fetchone()
             if row:
                 return {'state': row['state'] if row['state'] != 'dispatching' else 'unknown',
-                        'reply': row['reply'] or '这项操作已提交但结果未知，不会重复执行。请重新查询状态。'}
+                    'reply': row['reply'] or self._operation_unknown_reply(key)}
             db.execute("INSERT INTO operations VALUES(?,?,'dispatching','',?)", (scope, key, time.time()))
         return None
 
@@ -238,7 +256,7 @@ class ControlStore:
         if row is None:
             return None
         return {'state': row['state'] if row['state'] != 'dispatching' else 'unknown',
-                'reply': row['reply'] or '这项操作已提交但结果未知，不会重复执行。请重新查询状态。'}
+                'reply': row['reply'] or self._operation_unknown_reply(key)}
 
     def finish_operation(self, scope: str, key: str, state: str, reply: str) -> None:
         with self.connect() as db:

@@ -119,19 +119,35 @@ class QQDesktopBridgeTests(unittest.TestCase):
 
         def fake_queue(thread_id: str, message: str) -> tuple[bool, str]:
             calls.append((thread_id, message))
-            return True, ""
+            return True, f"Queued message 00000000-0000-4000-8000-000000000009 for thread {thread_id}."
 
         with tempfile.TemporaryDirectory() as directory, patch.dict(
             os.environ, {"CC_SESSION_KEY": "qqbot:user-a"}, clear=False
         ):
             server = BridgeServer(route_file=Path(directory) / "routes.json", queue_func=fake_queue)
             self.assertIn("已选择", server.handle_prompt(f"/use {THREAD}"))
-            self.assertIn("已排入", server.handle_prompt("/continue"))
+            reply = server.handle_prompt("/continue")
+            self.assertIn("已加入 Codex Desktop 可见待发送列表", reply)
+            self.assertIn("队列编号", reply)
             self.assertEqual(calls, [(THREAD, "继续")])
             self.assertEqual(load_routes(Path(directory) / "routes.json"), {"qqbot:user-a": THREAD})
 
+    def test_bridge_does_not_claim_queue_success_without_exact_acknowledgement(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {"CC_SESSION_KEY": "qqbot:user-a"}, clear=False
+        ):
+            server = BridgeServer(route_file=Path(directory) / "routes.json",
+                                  queue_func=lambda _thread, _message: (True, ""))
+            server.handle_prompt(f"/use {THREAD}")
+            reply = server.handle_prompt("/continue")
+            self.assertIn("没有可匹配的队列编号", reply)
+            self.assertIn("无法确认这条消息是否入队或开始执行", reply)
+            self.assertIn("不会重发", reply)
+            self.assertNotIn("已加入", reply)
+
     def test_acp_rpc_returns_update_then_prompt_result(self) -> None:
-        server = BridgeServer(queue_func=lambda _thread, _message: (True, ""))
+        server = BridgeServer(queue_func=lambda thread, _message: (
+            True, f"Queued message 00000000-0000-4000-8000-000000000009 for thread {thread}."))
         with patch.dict(os.environ, {"CC_SESSION_KEY": "qqbot:user-a"}, clear=False):
             server.handle_prompt(f"/use {THREAD}")
             responses = server.handle_rpc(
@@ -162,6 +178,24 @@ class QQDesktopBridgeTests(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(detail, ack.strip())
 
+    def test_queue_timeout_is_unknown_and_never_reported_as_not_sent(self) -> None:
+        with patch('qq_desktop_bridge._codex_command', return_value=['codex.exe']), \
+             patch('qq_desktop_bridge.subprocess.run', side_effect=subprocess.TimeoutExpired('codex', 1)):
+            ok, detail = queue_to_desktop(THREAD, '稍后处理', timeout_seconds=1)
+        self.assertIsNone(ok)
+        self.assertIn('命令超时', detail)
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+            os.environ, {'CC_SESSION_KEY': 'qqbot:queue-timeout'}, clear=False
+        ):
+            server = BridgeServer(route_file=Path(directory) / 'routes.json',
+                                  queue_func=lambda _thread, _message: (None, detail))
+            server.handle_prompt(f'/use {THREAD}')
+            reply = server.handle_prompt('/continue')
+        self.assertIn('可能已经排队', reply)
+        self.assertIn('结果未确认', reply)
+        self.assertIn('不会重发', reply)
+
 
 class BridgeProcessEncodingTests(unittest.TestCase):
     def run_bridge(self, prompts: list[str], *, expected_message: str | None = None) -> list[dict]:
@@ -183,6 +217,8 @@ class BridgeProcessEncodingTests(unittest.TestCase):
                 "expected=json.loads(sys.argv[1]); "
                 "actual=sys.argv[sys.argv.index('--message')+1]; "
                 "actual.encode('utf-8',errors='strict'); "
+                "thread=sys.argv[sys.argv.index('--thread')+1]; "
+                "print('Queued message 00000000-0000-4000-8000-000000000009 for thread '+thread+'.'); "
                 "sys.exit(0 if actual==expected else 2)"
             )
             bootstrap = bootstrap_setup + (

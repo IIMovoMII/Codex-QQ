@@ -13,7 +13,7 @@ sys.path.insert(0, str(PACKAGE_DIR))
 from desktop_control import (
     DesktopClient, DesktopControlError, MAX_FRAME_BYTES, STOP_METHOD,
     STOP_VERSION, QUEUED_FOLLOWUPS_METHOD, QUEUED_FOLLOWUPS_VERSION,
-    WindowsDesktopPipe, encode_frame, pause_desktop,
+    WindowsDesktopPipe, encode_frame, pause_desktop, public_error_code,
 )
 
 
@@ -133,14 +133,20 @@ class DesktopControlTests(unittest.TestCase):
         pipe = FakePipe(failure="no-client-found")
         ok, detail = pause_desktop(THREAD, pipe_factory=lambda: pipe)
         self.assertFalse(ok)
-        self.assertIn("窗口状态或接口版本", detail)
+        self.assertIn("no-client-found", detail)
+        self.assertIn("没有成功停止回执", detail)
         self.assertEqual(sum(m["method"] == STOP_METHOD for m in pipe.writes), 1)
 
     def test_missing_stop_confirmation_is_not_a_success(self) -> None:
         pipe = FakePipe(result={"ok": True})
         ok, detail = pause_desktop(THREAD, pipe_factory=lambda: pipe)
         self.assertFalse(ok)
-        self.assertIn("确认", detail)
+        self.assertIn("ok=true/轮次编号", detail)
+
+    def test_public_error_code_exposes_codes_without_paths_or_error_body(self):
+        self.assertEqual(public_error_code(DesktopControlError('owner-mismatch')), 'owner-mismatch')
+        self.assertEqual(public_error_code(ValueError('private-path/secret')), 'ValueError')
+        self.assertNotIn('secret', public_error_code(OSError(5, 'secret path')))
 
     def test_goal_pause_failure_is_reported_even_if_current_turn_stopped(self) -> None:
         pipe = FakePipe(result={"ok": True, "interruptedTurnId": TURN, "goalPauseError": "failed"})

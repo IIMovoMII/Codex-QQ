@@ -77,6 +77,9 @@ class FakeBackend:
     def status(self, t):
         return "运行中" if t == THREAD_A else "空闲"
 
+    def submission_status(self, receipt, catalog, connection):
+        return {'status': 'queued', 'payload_verified': True}
+
     def snapshot(self, t):
         return {**self.settings, "permissions": {"sandboxPolicy": {"type": "dangerFullAccess"}, "approvalPolicy": "never"}, "runtime": {"type": "active"}}
 
@@ -94,6 +97,10 @@ class FakeBackend:
 
 
 class ControlRouterTests(unittest.TestCase):
+    def fake_queue(self, thread_id, text):
+        self.calls.append((thread_id, text))
+        return True, f"Queued message 00000000-0000-4000-8000-000000000009 for thread {thread_id}."
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
@@ -103,8 +110,9 @@ class ControlRouterTests(unittest.TestCase):
         self.store = ControlStore(Path(self.tmp.name) / "control.sqlite")
         self.backend = FakeBackend()
         self.calls = []
-        self.controller = ControlRouter(self.store, FakeCatalog(), self.backend,
-                                        lambda t, text: (self.calls.append((t, text)) or True, ""))
+        self.controller = ControlRouter(
+            self.store, FakeCatalog(), self.backend,
+            lambda t, text: ControlRouterTests.fake_queue(self, t, text))
         self.index = 0
 
     def test_orphan_gateway_rejects_before_claiming_or_probing_when_app_is_closed(self):
@@ -258,7 +266,7 @@ class ControlRouterTests(unittest.TestCase):
         # The real gateway receives this event before starting its ACP child.
         cold = ControlRouter(ControlStore(Path(self.tmp.name) / 'cold.sqlite'),
                              FakeCatalog(), self.backend,
-                             lambda t, text: (self.calls.append((t, text)) or True, ''))
+                             lambda t, text: ControlRouterTests.fake_queue(self, t, text))
         token = cold.store.reference('test|qqbot:user|user', 'thread', {'thread_id': THREAD_A})
         params = self.request('继续', quote=f'引用标识：{token}',
                               message_id='cold-start-event')
@@ -284,8 +292,9 @@ class ControlRouterTests(unittest.TestCase):
         card = self.send('/use ' + THREAD_A)
         for index in range(3):
             params = self.request('继续', quote=card, message_id=f'before-acp-start-{index}')
-            restarted = ControlRouter(self.store, FakeCatalog(), self.backend,
-                                       lambda t, text: (self.calls.append((t, text)) or True, ''))
+            restarted = ControlRouter(
+                self.store, FakeCatalog(), self.backend,
+                lambda t, text: ControlRouterTests.fake_queue(self, t, text))
             reply = restarted.handle(params)
             self.assertIn('已提交', reply)
             self.assertEqual(restarted.handle(params), reply)
@@ -304,14 +313,14 @@ class ControlRouterTests(unittest.TestCase):
                     backend.probe = lambda: ('new-desktop', sent + 0.5)
                 cold = ControlRouter(ControlStore(Path(self.tmp.name) / (boundary + '.sqlite')),
                                      FakeCatalog(), backend,
-                                     lambda t, text: (self.calls.append((t, text)) or True, ''))
+                                     lambda t, text: ControlRouterTests.fake_queue(self, t, text))
                 self.assertIn('作废', cold.handle(params))
         self.assertEqual(self.calls, [])
 
     def test_bridge_state_store_failure_fails_closed_before_dispatch(self):
         with patch.object(self.store, 'begin_bridge_session', side_effect=sqlite3.OperationalError('locked')):
             with patch.object(self.backend, 'probe') as probe:
-                self.assertIn('本地控制状态暂不可用', self.send('继续'))
+                self.assertIn('写入 QQ 网关 READY 边界失败', self.send('继续'))
                 probe.assert_not_called()
         self.assertEqual(self.calls, [])
 
@@ -327,8 +336,9 @@ class ControlRouterTests(unittest.TestCase):
 
     def test_bridge_restart_for_one_qq_session_does_not_invalidate_another(self):
         with patch.dict(os.environ, {'CC_SESSION_KEY': 'qqbot:other'}, clear=False):
-            other = ControlRouter(self.store, FakeCatalog(), self.backend,
-                                  lambda t, text: (self.calls.append((t, text)) or True, ""))
+            other = ControlRouter(
+                self.store, FakeCatalog(), self.backend,
+                lambda t, text: ControlRouterTests.fake_queue(self, t, text))
             other_card_params = self.request('/use ' + THREAD_A, message_id='other-select')
             other_card_params['_meta']['cc_connect'].update({'session_key': 'qqbot:other', 'user_id': 'other'})
             other_card = other.handle(other_card_params)
@@ -393,7 +403,7 @@ class ControlRouterTests(unittest.TestCase):
                                          'CODEX_HOME': str(root / '.codex')}):
                 router = ControlRouter.runtime(lambda *_: (False, ''))
                 reply = router.handle({})
-            self.assertIn('无法安全读取', reply)
+            self.assertIn('control-state.sqlite 无法打开或版本不受支持', reply)
             self.assertEqual((data / 'control-state.sqlite').read_bytes(), original)
 
     def test_native_busy_queue_returns_visible_queue_card(self):
@@ -410,11 +420,33 @@ class ControlRouterTests(unittest.TestCase):
             submit.assert_called_once()
             self.assertEqual(self.calls, [])
 
+    def test_busy_message_returns_queue_number_and_status_card(self):
+        listing = self.send('对话')
+        card = self.send('1', quote=listing)
+        reply = self.send('忙时要处理的消息', quote=card)
+        self.assertIn('已提交给 Codex', reply)
+        self.assertIn('正在排队', reply)
+        self.assertIn('00000000-0000-4000-8000-000000000009', reply)
+        self.assertIn('删除', reply)
+        self.assertEqual(self.calls, [(THREAD_A, '忙时要处理的消息')])
+
+    def test_queue_success_without_exact_ack_is_reported_as_unconfirmed(self):
+        card = self.send('/use ' + THREAD_A)
+        with patch.object(self.backend, 'submit_message', return_value={
+                'state': 'confirmed', 'mode': 'queued', 'detail': 'queue returned success'}):
+            reply = self.send('不要重复发送的消息', quote=card, message_id='queue-without-id')
+        self.assertIn('没有返回可匹配的队列编号', reply)
+        self.assertIn('无法确认这条消息是否入队或开始执行', reply)
+        self.assertIn('不会重发', reply)
+        self.assertNotIn('已提交给 Codex', reply)
+        self.assertNotIn('已进入对话', reply)
+        self.assertEqual(self.calls, [])
+
     def test_window_error_does_not_mask_version_mismatch_or_unknown_native_state(self):
         card = self.send('/use ' + THREAD_A)
         for error, hint in (('no-client-found', '未载入'),
                             ('request-version-mismatch', '接口版本不匹配'),
-                            ('invalid-response', '不能认定是对话未打开')):
+                            ('invalid-response', '错误码 invalid-response')):
             with self.subTest(error=error), patch.object(self.backend, 'read_settings', side_effect=DesktopControlError(error)):
                 reply = self.send('设置', quote=card)
                 self.assertIn(hint, reply)
@@ -432,6 +464,17 @@ class ControlRouterTests(unittest.TestCase):
         self.assertIn("gpt-test", reply)
         self.assertIn("max", reply)
         self.assertIn("完全访问", reply)
+        self.assertEqual(self.calls, [])
+
+    def test_settings_do_not_invent_default_permission_values_for_missing_fields(self):
+        card = self.send('/use ' + THREAD_A)
+        with patch.object(self.backend, 'control_state', create=True, return_value={
+                **self.backend.settings, 'permissions': {'activePermissionProfile': None},
+                'permissions_known': True, 'snapshot_complete': True}):
+            reply = self.send('设置', quote=card)
+        self.assertIn('未返回 sandboxPolicy', reply)
+        self.assertIn('未返回 approvalPolicy', reply)
+        self.assertNotIn('权限：原生默认', reply)
         self.assertEqual(self.calls, [])
 
     def test_effort_options_and_direct_value_write_only_quoted_thread(self):
@@ -511,7 +554,7 @@ class ControlRouterTests(unittest.TestCase):
         card = self.send('/use ' + THREAD_A)
         with patch.object(self.store, 'reference', side_effect=OSError('disk-error')):
             reply = self.send('思考档位 high', quote=card)
-        self.assertIn('可能已经执行', reply)
+        self.assertIn('原生请求可能已到达', reply)
         self.assertEqual(len(self.backend.updates), 1)
 
     def test_state_store_failure_never_replays_native_operation(self):

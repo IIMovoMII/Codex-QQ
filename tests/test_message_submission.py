@@ -11,7 +11,6 @@ from control_backend import NativeBackend
 from test_desktop_control import FakePipe, THREAD, TURN
 from test_steer_fork_backend import idle_state
 from desktop_control import DesktopControlError
-from desktop_control import QUEUED_FOLLOWUPS_METHOD
 
 START = 'thread-follower-start-turn'
 CLIENT = '00000000-0000-4000-8000-000000000005'
@@ -22,27 +21,6 @@ class StartPipe(FakePipe):
         super().write(message)
         if message.get('method') == START and self.pending[-1].get('resultType') == 'success':
             self.pending[-1]['result'] = self.result
-
-
-class QueuePipe(FakePipe):
-    def __init__(self, catalog, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.catalog = catalog
-
-    def write(self, message):
-        super().write(message)
-        if message.get('method') == QUEUED_FOLLOWUPS_METHOD:
-            self.catalog.rows = copy.deepcopy(message['params']['state'][THREAD])
-            self.pending[-1]['result'] = {'ok': True}
-
-
-class QueueCatalog:
-    def __init__(self):
-        self.rows = [{'id': 'existing', 'text': '已有消息',
-                      'submission': {'hostId': 'local', 'status': 'queued'}}]
-
-    def saved_queue_rows(self, _thread):
-        return copy.deepcopy(self.rows)
 
 
 class MessageSubmissionTests(unittest.TestCase):
@@ -91,7 +69,15 @@ class MessageSubmissionTests(unittest.TestCase):
         self.state.update({'snapshot_complete': False, 'runtime': {'type': 'idle'}})
         result = self.send()
         self.assertEqual(result['state'], 'rejected')
-        self.assertIn('状态过大', result['reply'])
+        self.assertIn('完整状态帧超过 8 MiB', result['reply'])
+        self.assertIn('未同时确认空闲、终态和已恢复', result['reply'])
+        self.assertEqual(self.starts(), [])
+        self.queue.assert_not_called()
+
+    def test_missing_requests_field_is_not_treated_as_empty_when_starting(self):
+        self.state.update({'snapshot_complete': True, 'requests_known': False})
+        result = self.send()
+        self.assertEqual(result['state'], 'rejected')
         self.assertEqual(self.starts(), [])
         self.queue.assert_not_called()
 
@@ -124,14 +110,16 @@ class MessageSubmissionTests(unittest.TestCase):
         for key in ('sandboxPolicy', 'approvalPolicy', 'permissions', 'collaborationMode', 'serviceTier', 'expectedTurnId'):
             self.assertNotIn(key, request)
 
-    def test_active_message_is_not_hidden_in_background_queue(self):
+    def test_active_message_is_appended_to_native_queue(self):
+        queue_id = '00000000-0000-4000-8000-000000000009'
+        self.queue.return_value = (True, f'Queued message {queue_id} for thread {THREAD}.')
         for turn, runtime in (({'turnId': TURN, 'status': 'inProgress'}, {'type': 'active'}),
                               ({'turnId': None, 'status': 'inProgress'}, {'type': 'active'})):
             self.state['turn'], self.state['runtime'] = turn, runtime
             result = self.send()
-            self.assertEqual(result['state'], 'rejected')
-            self.assertIn('未发送、未排队', result['reply'])
-        self.queue.assert_not_called()
+            self.assertEqual(result['state'], 'confirmed')
+            self.assertEqual(result['mode'], 'queued')
+        self.assertEqual(self.queue.call_count, 2)
         self.assertEqual(self.starts(), [])
 
     def test_pending_unknown_unloaded_and_unresolved_idle_never_submits(self):
@@ -162,7 +150,8 @@ class MessageSubmissionTests(unittest.TestCase):
         with patch('control_backend.time.sleep') as sleep:
             result = self.send()
         self.assertEqual(result['state'], 'rejected')
-        self.assertIn('恢复或载入', result['reply'])
+        self.assertIn('resumeState=needs_resume', result['reply'])
+        self.assertIn('未发送、未排队', result['reply'])
         self.assertEqual(sleep.call_count, 5)
         self.queue.assert_not_called()
         self.assertEqual(self.starts(), [])
@@ -173,7 +162,7 @@ class MessageSubmissionTests(unittest.TestCase):
         with patch('control_backend.time.sleep') as sleep:
             result = self.send()
         self.assertEqual(result['state'], 'rejected')
-        self.assertIn('上一次提交尚未取得原生确认', result['reply'])
+        self.assertIn('上一条提交尚无 Desktop 回执', result['reply'])
         self.assertEqual(sleep.call_count, 0)
         self.queue.assert_not_called()
         self.assertEqual(self.starts(), [])
@@ -196,14 +185,16 @@ class MessageSubmissionTests(unittest.TestCase):
         self.queue.assert_not_called()
         self.assertEqual(self.starts(), [])
 
-    def test_task_changes_to_active_before_idle_start_fails_closed(self):
+    def test_task_changes_to_active_before_idle_start_uses_native_queue(self):
         idle = copy.deepcopy(self.state)
         active = {**idle, 'turn': {'turnId': 'new-active', 'status': 'inProgress'}, 'runtime': {'type': 'active'}}
         self.backend.snapshot = Mock(side_effect=[idle, active])
+        queue_id = '00000000-0000-4000-8000-000000000009'
+        self.queue.return_value = (True, f'Queued message {queue_id} for thread {THREAD}.')
         result = self.send()
-        self.assertEqual(result['state'], 'rejected')
-        self.assertIn('未发送、未排队', result['reply'])
-        self.queue.assert_not_called()
+        self.assertEqual(result['state'], 'confirmed')
+        self.assertEqual(result['mode'], 'queued')
+        self.queue.assert_called_once()
         self.assertEqual(self.starts(), [])
 
     def test_lost_start_response_never_falls_back_to_queue_or_steer(self):
@@ -236,37 +227,29 @@ class MessageSubmissionTests(unittest.TestCase):
         self.assertEqual(self.pipe.writes, [])
         self.queue.assert_not_called()
 
-    def test_busy_message_never_dispatches_to_background_queue(self):
+    def test_busy_message_is_appended_to_native_queue_with_exact_receipt(self):
         self.state['turn']['status'] = 'inProgress'
         self.state['runtime'] = {'type': 'active'}
-        self.queue.return_value = (False, 'codex queue 超时。')
-        self.assertEqual(self.send()['state'], 'rejected')
+        queue_id = '00000000-0000-4000-8000-000000000009'
+        self.queue.return_value = (True, f'Queued message {queue_id} for thread {THREAD}.')
+        result = self.send()
+        self.assertEqual(result['state'], 'confirmed')
+        self.assertEqual(result['mode'], 'queued')
+        self.assertEqual(result['queue_id'], queue_id)
+        self.queue.assert_called_once_with(THREAD, '暂停后正常发送中文😀\n第二行')
         self.assertEqual(self.starts(), [])
-        self.queue.assert_not_called()
+        self.assertEqual(self.pipe.writes, [])
 
-    def test_busy_message_never_replaces_desktop_queue_snapshot(self):
-        catalog = QueueCatalog()
-        pipe = QueuePipe(catalog)
-        state = {**self.state, 'turn': {'turnId': TURN, 'status': 'inProgress'},
-                 'runtime': {'type': 'active'}}
-        backend = NativeBackend(pipe_factory=lambda: pipe, contract_check=lambda: None, catalog=catalog)
-        backend.snapshot = lambda _thread, expected_connection=None: copy.deepcopy(state)
-        backend.probe = lambda: ('same-desktop', 1)
-        for edit in ('add', 'delete', 'reorder', 'consume'):
-            with self.subTest(edit=edit):
-                # A UI change may occur at any time. Rejection must neither
-                # overwrite that edit nor even request a replacement snapshot.
-                catalog.rows = [{'id': edit, 'text': '电脑端最新输入',
-                                 'submission': {'hostId': 'local', 'status': 'queued'}}]
-                expected = copy.deepcopy(catalog.rows)
-                result = backend.submit_message(THREAD, '忙时中文😀', 'same-desktop', CLIENT, self.queue)
-                self.assertEqual(result['state'], 'rejected')
-                self.assertIn('未发送、未排队', result['reply'])
-                self.assertIn('引导', result['reply'])
-                self.assertEqual(catalog.rows, expected)
-                self.assertEqual(pipe.writes, [])
-        self.queue.assert_not_called()
-
+    def test_busy_queue_timeout_is_unknown_and_not_retried(self):
+        self.state['turn']['status'] = 'inProgress'
+        self.state['runtime'] = {'type': 'active'}
+        self.queue.return_value = (None, 'codex queue 命令超时')
+        result = self.send()
+        self.assertEqual(result['state'], 'unknown')
+        self.assertIn('可能已经排队', result['reply'])
+        self.assertIn('不会重发', result['reply'])
+        self.queue.assert_called_once()
+        self.assertEqual(self.starts(), [])
 
 if __name__ == '__main__':
     unittest.main()

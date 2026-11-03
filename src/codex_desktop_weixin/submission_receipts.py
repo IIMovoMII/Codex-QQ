@@ -113,12 +113,16 @@ def accepted_submissions(turns: list[dict]) -> list[dict]:
 
 def observed_status(receipt: dict, queue_path: Path, snapshot: Any) -> dict:
     """A fixed number of observations; losing either side never causes a resend."""
-    result = {'status': 'unconfirmed', 'client_id': receipt.get('client_id'), 'turn_id': None}
+    result = {'status': 'unconfirmed', 'client_id': receipt.get('client_id'), 'turn_id': None,
+              'reason': 'queue-and-history-not-yet-matched'}
     try:
         queued = read_queued_item(queue_path, receipt['thread_id'], receipt['queue_id'],
                                   text_digest=receipt.get('text_digest'))
+        if queued is None:
+            result['reason'] = 'queue-row-not-found'
         if queued and queued['client_id']:
             if result['client_id'] and result['client_id'] != queued['client_id']:
+                result['reason'] = 'queue-client-id-conflicts-with-receipt'
                 return result
             result['client_id'] = queued['client_id']
         if result['client_id']:
@@ -126,28 +130,67 @@ def observed_status(receipt: dict, queue_path: Path, snapshot: Any) -> dict:
                 state = snapshot(receipt['thread_id'])
             except (OSError, TimeoutError, ValueError, DesktopControlError):
                 state = {}
+                result['reason'] = 'desktop-history-read-failed'
             found = [x for x in state.get('accepted_submissions', [])
                      if x.get('client_id') == result['client_id']]
             if len(found) == 1:
                 return {**result, 'status': 'entered', 'turn_id': found[0]['turn_id'],
-                        'turn_status': found[0].get('status')}
+                        'turn_status': found[0].get('status'), 'reason': None}
             if len(found) > 1:
+                result['reason'] = 'client-id-matched-multiple-turns'
                 return result
+            if state.get('snapshot_complete') is False:
+                result['reason'] = 'desktop-history-summary-incomplete'
         # Sample again after the snapshot; a consumed row is never "started".
         current = read_queued_item(queue_path, receipt['thread_id'], receipt['queue_id'],
                                   text_digest=receipt.get('text_digest'))
         if current is not None:
-            return {**result, 'status': 'queued', 'payload_verified': current['payload_verified']}
-    except (sqlite3.Error, OSError, ValueError, TimeoutError, KeyError, DesktopControlError):
-        pass
+            return {**result, 'status': 'queued', 'payload_verified': current['payload_verified'],
+                    'reason': None if current['payload_verified'] else 'queued-row-payload-not-verified'}
+        if result['reason'] not in ('desktop-history-read-failed', 'desktop-history-summary-incomplete'):
+            result['reason'] = 'absent-from-queue-and-no-accepted-turn'
+    except (sqlite3.Error, OSError, ValueError, TimeoutError, KeyError, DesktopControlError) as error:
+        result['reason'] = f'queue-or-desktop-read-error:{type(error).__name__}'
     return result
 
 
 def status_text(value: dict) -> str:
-    if value['status'] == 'queued':
+    reason = value.get('reason')
+    status = value.get('status')
+    if reason == 'queued-row-payload-not-verified':
+        return '正在排队：本地原生队列里存在该编号，但正文结构或摘要与发送回执不能核对，无法证明仍是原消息。不会删除或重发；请检查 Desktop 队列中的原文。'
+    if status == 'queued':
         return '正在排队：查询时这条消息仍在原生队列，尚未确认开始。任务被暂停后，旧排队项可能继续等待处理。'
-    if value['status'] == 'entered':
+    if status == 'entered':
         suffix = {'completed': '对应轮次已完成。', 'failed': '对应轮次已出错。',
                   'interrupted': '对应轮次已暂停。'}.get(value.get('turn_status'), '已不在等待排队。')
         return '已进入对话：窗口已确认这条消息的身份。' + suffix
-    return '已提交，但当前执行状态未确认。记录消失不等于已开始，也可能被电脑删除；不会重发。'
+    if reason == 'desktop-history-read-failed':
+        return '该消息不在本地可读队列中，且 Desktop 历史读取失败；不能确认它已开始、已删除还是仍由 Desktop 持有。不会重发。请在目标对话核对。'
+    if reason == 'desktop-history-summary-incomplete':
+        return '该消息不在本地可读队列中；Desktop 只返回最近一轮摘要，未提供包含这条消息身份的完整历史。无法据此判断已执行还是已删除，不会重发；请在目标对话查看原文。'
+    if reason == 'queue-row-not-found':
+        return '没有在本地可读队列中找到这条消息，也没有匹配到已接受的 turn ID；它可能已开始、已被电脑删除或已移出队列。不会重发，请查看目标对话。'
+    if reason == 'absent-from-queue-and-no-accepted-turn':
+        return '队列中已没有这条消息，Desktop 最近历史也没有匹配到它的 client ID；无法区分已消费、被删除或已移出队列。不会重发，请在目标对话查看。'
+    if reason == 'queue-client-id-conflicts-with-receipt':
+        return '队列编号对应的 client ID 与发送回执不一致；没有确认这是否是原消息。不会删除或重发，请检查 Desktop 队列。'
+    if reason == 'client-id-matched-multiple-turns':
+        return '同一个 client ID 匹配到多个 Desktop 轮次，不能选择其中一个作为本次发送结果。不会重发，请检查目标对话。'
+    if isinstance(reason, str) and reason.startswith('queue-or-desktop-read-error:'):
+        error = reason.partition(':')[2]
+        detail = {'DatabaseError': '本机 SQLite 队列读取失败，可能是数据库暂不可读或结构不兼容',
+                  'OperationalError': '本机队列数据库不可读，或 Desktop 队列结构与当前适配不兼容',
+                  'IntegrityError': '本机队列数据库记录违反结构约束',
+                  'OSError': '本机队列文件读取失败',
+                  'TimeoutError': '读取 Desktop 队列或历史超时'}.get(error, f'读取时发生 {error}')
+        return f'发送结果未确认：{detail}。没有重发；检查 Desktop 可见队列和目标对话后再决定。'
+    if reason == 'queue-and-history-not-yet-matched':
+        return ('Codex queue 返回了成功结果，但尚未在本地队列或 Desktop 已接受的 turn 历史中找到匹配编号；'
+                '不能确认这条消息已入队或开始执行。不会重发，请检查目标对话的可见待发送列表和最近消息。')
+    if reason:
+        code = reason if re.fullmatch(r'[A-Za-z0-9._:-]{1,100}', reason) else 'unknown-status-reason'
+        return (f'状态查询返回未处理的原因码 {code}，没有取得可匹配的队列行或 Desktop turn ID；'
+                '发送状态不能判定。不会重发，请检查目标对话和可见待发送列表。')
+    return ('状态查询没有返回受支持的队列状态，也没有可匹配的 Desktop turn ID；发送状态不能判定。'
+            '不会重发，请检查目标对话和可见待发送列表。')

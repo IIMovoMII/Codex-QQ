@@ -61,7 +61,8 @@ class CreationCommands:
         # temporarily stale, but a creation wizard must fail closed if its
         # origin can no longer be verified.
         if not source or not self.r.catalog.thread(source):
-            return '原生调用来源已不可用，未创建。请引用一个已有对话重新开始。', 'rejected'
+            return (f'原生调用来源已不可用：本机对话目录中没有源对话 {source or "（缺少 thread ID）"}，'
+                    '无法核对其项目归属。没有调用 create_thread，也没有创建新对话；请刷新“对话”列表后，从仍存在的对话重新开始。', 'rejected')
         if kind == 'creation_projects':
             if text == '下一页':
                 if not data['remaining']:
@@ -102,7 +103,7 @@ class CreationCommands:
             row = {'id': ident, 'name': result.get('title') or data['title'] or '新对话（标题待刷新）',
                    'project_name': data['project']['name'] if data['project']['id'] else None}
         elif row.get('project_id') != data['project']['id']:
-            result = {**result, 'state': 'unknown', 'reply': '新对话已创建，但本地项目归属还未核实一致。请在电脑核对，不要重复创建。'}
+            result = {**result, 'state': 'unknown', 'reply': f'新对话已创建，ID={ident}；本地目录的 project_id={row.get("project_id")} 与所选 project_id={data["project"]["id"]} 不一致。首条任务可能已开始，请核对该对话所属项目，不要重复创建。'}
         body = self.r.catalog.label(row) + '\n' + result['reply']
         settings = result.get('settings')
         if settings and settings.get('model') and settings.get('effort'):

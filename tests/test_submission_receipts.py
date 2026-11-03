@@ -87,6 +87,16 @@ class ReceiptTests(QueueBase, unittest.TestCase):
         self.assertEqual(result['status'], 'queued')
         self.assertFalse(result['payload_verified'])
         self.assertIsNone(result['client_id'])
+        self.assertIn('正文结构或摘要', status_text(result))
+        self.assertIn('不会删除或重发', status_text(result))
+
+    def test_consumed_row_with_bounded_history_explains_missing_evidence(self):
+        self.queue.consume()
+        result = observed_status(receipt(client_id=CLIENT), self.path, lambda _: {
+            'snapshot_complete': False, 'accepted_submissions': []})
+        self.assertEqual(result['reason'], 'desktop-history-summary-incomplete')
+        self.assertIn('只返回最近一轮摘要', status_text(result))
+        self.assertIn('不会重发', status_text(result))
 
     def test_snake_case_is_explicit_and_mixed_aliases_reject(self):
         payload = {'client_user_message_id': CLIENT, 'input': [{'type': 'text', 'text': TEXT}]}
@@ -147,6 +157,18 @@ class ReceiptTests(QueueBase, unittest.TestCase):
         result = observed_status(receipt(), self.path, disconnected)
         self.assertEqual(result['status'], 'queued')
         self.assertEqual(result['client_id'], CLIENT)
+
+    def test_unconfirmed_status_text_names_missing_evidence_and_forbids_resend(self):
+        for value, expected in (
+                ({'status': 'unconfirmed', 'reason': 'queue-and-history-not-yet-matched'},
+                 '本地队列或 Desktop 已接受的 turn 历史'),
+                ({'status': 'unexpected', 'reason': 'future-status-code'},
+                 '原因码 future-status-code'),
+                ({'reason': None}, '没有返回受支持的队列状态')):
+            with self.subTest(value=value):
+                text = status_text(value)
+                self.assertIn(expected, text)
+                self.assertIn('不会重发', text)
 
     def test_projection_skips_optimistic_or_unaccepted_and_keeps_no_text(self):
         turns = [{'turnId': TURN, 'status': 'inProgress', 'params': {'clientUserMessageId': CLIENT},
@@ -283,7 +305,8 @@ class ReceiptRouterTests(unittest.TestCase):
     def test_missing_native_id_does_not_fabricate_status_or_delete_card(self):
         self.controller.queue_func = lambda t, text: (True, '')
         ack = self.send(TEXT, quote=self.send('/use ' + THREAD_A))
-        self.assertIn('状态未确认', ack)
+        self.assertIn('没有返回可匹配的队列编号', ack)
+        self.assertIn('不会重发', ack)
         self.assertEqual(self.controller._resolve_quote('test|qqbot:user|user', ack)['kind'], 'thread')
 
     def test_status_can_show_entered_completed_without_another_send(self):

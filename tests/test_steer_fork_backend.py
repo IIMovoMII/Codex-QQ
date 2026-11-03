@@ -166,6 +166,13 @@ class ForkBackendTests(unittest.TestCase):
         self.assertEqual(self.fork()['state'], 'rejected')
         self.tools.fork_latest.assert_not_called()
 
+    def test_missing_native_requests_list_blocks_fork_before_dispatch(self):
+        self.state['requests_known'] = False
+        result = self.fork()
+        self.assertEqual(result['state'], 'rejected')
+        self.assertIn('没有提供原生 requests 列表', result['reply'])
+        self.tools.fork_latest.assert_not_called()
+
     def test_source_change_after_dispatch_is_unknown_with_new_identity(self):
         def mutate(*_):
             self.boundary['updated_at'] = 101

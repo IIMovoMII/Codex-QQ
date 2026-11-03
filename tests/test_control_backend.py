@@ -118,6 +118,33 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(view['turn']['status'], 'inProgress')
         self.assertNotIn('secret', str(view))
 
+    def test_permission_baseline_is_complete_only_when_all_fields_are_present(self):
+        fields = {'sandboxPolicy': {'type': 'readOnly'}, 'approvalPolicy': 'on-request',
+                  'activePermissionProfile': None, 'approvalsReviewer': 'user'}
+        self.assertTrue(NativeBackend._view({'currentPermissions': fields, 'turns': []})['permissions_known'])
+        for missing in fields:
+            partial = {key: value for key, value in fields.items() if key != missing}
+            with self.subTest(missing=missing):
+                self.assertFalse(NativeBackend._view({'currentPermissions': partial, 'turns': []})['permissions_known'])
+
+    def test_permission_write_with_partial_baseline_is_rejected_before_update(self):
+        backend, _ = self.backend()
+        partial = {'snapshot_complete': True, 'permissions_known': False,
+                   'permissions': {'sandboxPolicy': {'type': 'readOnly'},
+                                   'approvalPolicy': 'on-request',
+                                   'activePermissionProfile': None}, 'settings': {},
+                   'owner_id': 'desktop-owner'}
+        backend.snapshot = lambda *_args, **_kwargs: partial
+        changes = {'sandboxPolicy': {'type': 'dangerFullAccess'}, 'approvalPolicy': 'never',
+                   'approvalsReviewer': 'user', 'activePermissionProfile': None}
+        with patch.object(backend, 'call') as call:
+            result = backend.update_permissions(
+                THREAD, changes, {'digest': 'not-used', 'owner_id': 'desktop-owner'})
+        self.assertEqual(result['state'], 'rejected')
+        self.assertIn('approvalsReviewer', result['reply'])
+        self.assertIn('没有调用设置更新接口', result['reply'])
+        call.assert_not_called()
+
     def test_snapshot_only_accepts_same_owner_host_thread_and_contract_version(self):
         class SnapshotPipe(FakePipe):
             def write(self, message):
@@ -189,6 +216,50 @@ class BackendTests(unittest.TestCase):
         self.assertFalse(view['snapshot_complete'])
         self.assertTrue(view['bounded_idle_safe'])
         self.assertEqual(view['runtime'], {'type': 'idle'})
+        self.assertFalse(view['requests_known'])
+        self.assertFalse(view['permissions_known'])
+        self.assertEqual(view['bounded_snapshot']['unavailable_fields'],
+                         ['native_requests', 'current_permissions', 'thread_goal', 'full_history'])
+
+    def test_bounded_snapshot_extracts_read_only_async_questions_and_manual_compaction(self):
+        class BoundedTools:
+            def call(self, *_args, **_kwargs):
+                return {'state': 'confirmed', 'data': {
+                    'thread': {'id': THREAD, 'hostId': 'local', 'kind': 'codex', 'cwd': 'D:/work',
+                               'status': {'type': 'active', 'activeFlags': []}},
+                    'turns': [{'id': TURN, 'status': 'inProgress', 'items': [
+                        {'type': 'agentMessage', 'id': 'ask-1', 'delivery': 'async',
+                         'questions': [{'title': '继续吗？', 'options': ['是', '否']}]},
+                        {'type': 'contextCompaction', 'id': 'compact-1', 'source': 'manual', 'status': 'completed'},
+                    ]}],
+                }}
+
+        backend = NativeBackend(pipe_factory=lambda: FakePipe(), app_tools=BoundedTools())
+        with patch.object(backend, 'probe', return_value=('same', 1.0)), \
+                patch.object(backend, 'read_settings', return_value={'model': 'gpt-test', 'effort': 'max',
+                                                                       'raw': {'resumeState': 'resumed'}}):
+            view = backend._bounded_snapshot(THREAD, expected_connection='same')
+        self.assertFalse(view['async_questions_unverified'])
+        self.assertEqual(view['async_questions'][0]['message_id'], 'ask-1')
+        self.assertEqual(view['compactions'][0]['id'], 'compact-1')
+        self.assertFalse(view['requests_known'])
+        self.assertFalse(view['permissions_known'])
+
+    def test_bounded_snapshot_marks_question_state_unknown_when_items_are_missing(self):
+        class BoundedTools:
+            def call(self, *_args, **_kwargs):
+                return {'state': 'confirmed', 'data': {
+                    'thread': {'id': THREAD, 'hostId': 'local', 'kind': 'codex', 'cwd': 'D:/work',
+                               'status': {'type': 'idle'}},
+                    'turns': [{'id': TURN, 'status': 'completed'}],
+                }}
+
+        backend = NativeBackend(pipe_factory=lambda: FakePipe(), app_tools=BoundedTools())
+        with patch.object(backend, 'probe', return_value=('same', 1.0)), \
+                patch.object(backend, 'read_settings', return_value={'raw': {'resumeState': 'resumed'}}):
+            view = backend._bounded_snapshot(THREAD, expected_connection='same')
+        self.assertTrue(view['async_questions_unverified'])
+        self.assertEqual(view['async_questions'], [])
 
     def test_bounded_snapshot_rejects_conflicting_thread_and_turn_status(self):
         class BoundedTools:

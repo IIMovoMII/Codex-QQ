@@ -16,7 +16,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from desktop_control import DesktopControlError, WindowsDesktopPipe, pipe_server_identity
+from desktop_control import DesktopControlError, WindowsDesktopPipe, pipe_server_identity, public_error_code
 from control_contract import check_app_tools_contract
 from tool_schema import validate_arguments
 from endpoint_hint import PIPE_NAME, MAX_ENDPOINT_CANDIDATES, discover_native_endpoints
@@ -271,16 +271,16 @@ class NativeAppTools:
         """Open an existing verified local chat in the current Desktop window."""
         try:
             self.thread(thread_id, expected_identity)
-        except (DesktopControlError, OSError, TimeoutError, ValueError):
-            return {'state': 'rejected', 'reply': '无法核实原对话身份，未尝试打开。'}
+        except (DesktopControlError, OSError, TimeoutError, ValueError) as error:
+            return {'state': 'rejected', 'reply': f'未打开对话：read_thread 未返回本地 thread ID={thread_id} 的有效身份（{public_error_code(error)}）。没有调用 navigate_to_codex_page。'}
         result = self.call('navigate_to_codex_page', {'threadId': thread_id},
                            source_thread_id=thread_id, expected_identity=expected_identity,
                            operation_id=operation_id, mutation=True)
         if result['state'] == 'confirmed' and result.get('data') == {'navigated': True}:
             return {'state': 'confirmed'}
         if result['state'] == 'rejected':
-            return {'state': 'rejected', 'reply': '当前 Desktop 无法打开此对话，请在电脑打开后再发送任务。'}
-        return {'state': 'unknown', 'reply': '已请求打开对话，但未取得确认。请先在电脑核对；不会重复打开或发送任务。'}
+            return {'state': 'rejected', 'reply': f'Desktop 没有接受 navigate_to_codex_page（{result.get("reason", "无错误码")}）；没有发送任务。确认原对话仍存在后重新选择。'}
+        return {'state': 'unknown', 'reply': f'已调用 navigate_to_codex_page，但 Desktop 未返回 navigated=true（{result.get("reason", "无确认回执")}）。对话可能已打开；没有发送任务，不要重复发送正文。'}
 
     def boundary(self, thread_id: str, expected_identity: str) -> dict:
         result = self.call('read_thread', {'threadId': thread_id, 'turnLimit': 1,
@@ -303,23 +303,25 @@ class NativeAppTools:
     def fork_latest(self, thread_id: str, expected_identity: str, operation_id: str) -> dict:
         try:
             self.thread(thread_id, expected_identity)
-        except (DesktopControlError, OSError, TimeoutError, ValueError):
-            return {'state': 'rejected', 'reply': '无法确认原生源对话，未分支。请恢复连接后重新查看范围。'}
+        except (DesktopControlError, OSError, TimeoutError, ValueError) as error:
+            return {'state': 'rejected', 'reply': f'未创建分支：read_thread 没有确认本地源对话 ID={thread_id}（{public_error_code(error)}）；没有调用 fork_thread。'}
         result = self.call('fork_thread', {'threadId': thread_id, 'environment': {'type': 'same-directory'}},
                            source_thread_id=thread_id, expected_identity=expected_identity,
                            operation_id=operation_id, mutation=True)
         if result['state'] != 'confirmed':
-            return {'state': result['state'], 'reply': '分支结果未确认，可能已创建；不会再次分支，请先在电脑查看列表。' if result['state'] == 'unknown' else '当前 Desktop 的原生分支服务不可用，未分支。'}
+            return {'state': result['state'], 'reply': f'Desktop fork_thread 未返回成功状态（{result.get("reason", "无回执")}）；'
+                    + ('分支可能已创建，不会重复创建。请在对话列表查找源对话“' + thread_id + '”的新分支。' if result['state'] == 'unknown'
+                       else '没有创建分支。请检查 Desktop 是否发布 fork_thread。')}
         data, ident = result['data'], result['data'].get('threadId')
         if (data.get('status') != 'created' or not isinstance(ident, str)
                 or not THREAD_ID.fullmatch(ident) or ident == thread_id
                 or data.get('sourceThreadId') != thread_id
                 or data.get('environment') != {'type': 'same-directory'}):
-            return {'state': 'unknown', 'reply': '原生分支返回身份不完整，结果未知。请在电脑查看；不会再次创建。'}
+            return {'state': 'unknown', 'reply': f'Desktop 返回了 fork_thread 成功状态，但缺少一致的 status=created、sourceThreadId={thread_id}、threadId 或 same-directory 环境字段。分支可能已创建；不会再次创建，请在列表核对。'}
         sync = data.get('synchronization')
         if not isinstance(sync, dict) or sync.get('status') != 'complete':
             return {'state': 'unknown', 'thread_id': ident,
-                    'reply': '分支已创建，但原生设置同步没有完成。请先在电脑修复这个分支，不要重复分支或发送任务。'}
+                    'reply': f'分支已创建，thread ID={ident}；Desktop 回执中的 synchronization.status 不是 complete。没有发送首条任务；先在对话列表检查该分支设置，不要重复创建。'}
         return {'state': 'confirmed', 'thread_id': ident}
 
     def rename(self, thread_id: str, title: str, expected_identity: str, operation_id: str) -> dict:
@@ -329,22 +331,24 @@ class NativeAppTools:
             if not 1 <= len(title) <= 120 or any(ord(c) < 32 for c in title):
                 raise ValueError('invalid-title')
             before = self.thread(thread_id, expected_identity)
-        except (ValueError, UnicodeError, DesktopControlError):
-            return {'state': 'rejected', 'reply': '标题或原生对话身份无法确认，未修改。标题须为 1～120 字的单行文字。'}
+        except (ValueError, UnicodeError, DesktopControlError) as error:
+            return {'state': 'rejected', 'reply': f'未改名：标题须是 1～120 字单行文本，且 read_thread 必须确认本地目标 ID={thread_id}（{public_error_code(error)}）。没有调用 set_thread_title。'}
         if before['title'] == title:
             return {'state': 'confirmed', 'reply': '已经是这个标题，没有重复修改。', 'title': title}
         result = self.call('set_thread_title', {'source': 'codex', 'threadId': thread_id, 'title': title},
                            source_thread_id=thread_id, expected_identity=expected_identity,
                            operation_id=operation_id, mutation=True)
         if result['state'] != 'confirmed':
-            return {'state': result['state'], 'reply': '改名结果未确认，可能已经生效；不会自动重试，请查看对话列表。' if result['state'] == 'unknown' else '当前 Desktop 的原生改名服务不可用，未修改。'}
+            return {'state': result['state'], 'reply': f'Desktop set_thread_title 没有返回成功状态（{result.get("reason", "无回执")}）；'
+                    + ('标题可能已修改，不会再次写入。请在对话列表核对。' if result['state'] == 'unknown'
+                       else '没有修改标题。请检查 Desktop 是否发布 set_thread_title。')}
         data = result['data']
         try:
             after = self.thread(thread_id, expected_identity)
         except DesktopControlError:
             after = {}
         if data.get('threadId') != thread_id or data.get('title') != title or after.get('title') != title:
-            return {'state': 'unknown', 'reply': '窗口已受理改名，但回读未确认一致；不会重复写入，请在电脑核对。'}
+            return {'state': 'unknown', 'reply': f'Desktop 受理了 set_thread_title，但工具回执或 read_thread 回读不一致（期望 thread={thread_id}、title={title!r}，回读 title={after.get("title")!r}）。不会重复写入。'}
         return {'state': 'confirmed', 'reply': '标题已修改并通过原生回读确认；旧引用仍指向这个对话。', 'title': title}
 
     def create(self, source_thread_id: str, project: dict, prompt: str, title: str | None,
@@ -368,24 +372,26 @@ class NativeAppTools:
                 if project != {'id': None, 'name': '无项目', 'path': None}:
                     raise ValueError('invalid-projectless-selection')
                 target = {'type': 'projectless'}
-        except (ValueError, UnicodeError, DesktopControlError):
-            return {'state': 'rejected', 'reply': '原生来源、项目或首条任务无法确认，未创建。请重新开始向导。'}
+        except (ValueError, UnicodeError, DesktopControlError) as error:
+            return {'state': 'rejected', 'reply': f'未创建：首条任务/标题格式无效，或 read_thread/list_projects 未确认来源项目（{public_error_code(error)}）。没有调用 create_thread。请重新选择项目并查看确认卡。'}
         result = self.call('create_thread', {'target': target, 'prompt': prompt,
                            **({'title': title} if title else {})}, source_thread_id=source_thread_id,
                            expected_identity=expected_identity, operation_id=operation_id, mutation=True)
         if result['state'] != 'confirmed':
-            return {'state': result['state'], 'reply': '创建结果未确认，可能已创建并开始执行。不会自动重试；请先查看新对话列表，不要再次确认创建。' if result['state'] == 'unknown' else '当前 Desktop 的原生创建服务不可用，未创建。'}
+            return {'state': result['state'], 'reply': f'Desktop create_thread 未返回成功状态（{result.get("reason", "无回执")}）；'
+                    + ('新对话可能已创建且首条任务可能已开始，不会重试。请在列表核对，不要再次确认创建。' if result['state'] == 'unknown'
+                       else '没有创建对话或提交首条任务。请检查 Desktop 是否发布 create_thread。')}
         data = result['data']
         ident = data.get('threadId') or (data.get('conversationId') if data.get('status') == 'created' else None)
         if (not isinstance(ident, str) or not THREAD_ID.fullmatch(ident) or ident == source_thread_id
                 or data.get('hostId') != 'local'):
-            return {'state': 'unknown', 'reply': '原生创建返回的信息不完整，结果未知。请查看新对话列表；不会再次创建。'}
+            return {'state': 'unknown', 'reply': f'Desktop 返回 create_thread 成功状态，但缺少有效本地 thread ID 或 hostId=local（threadId={ident!r}）。新对话可能已创建；不会重复创建，请在列表核对。'}
         first = data.get('firstTurn')
         if first is not None and (not isinstance(first, dict) or first.get('status') != 'accepted'):
-            return {'state': 'unknown', 'thread_id': ident, 'reply': '对话已创建，但首条任务尚未确认开始。请引用本条查看状态；不要重新创建。'}
+            return {'state': 'unknown', 'thread_id': ident, 'reply': f'新对话已创建，thread ID={ident}；create_thread 未返回 firstTurn.status=accepted。首条任务是否开始未确认；不要重建，请引用本条查看该对话状态。'}
         try:
             after = self.thread(ident, expected_identity)
-        except DesktopControlError:
-            return {'state': 'unknown', 'thread_id': ident, 'reply': '已取得新对话编号，但原生回读未确认。任务可能已经开始；请引用本条查询，不要重新创建。'}
+        except DesktopControlError as error:
+            return {'state': 'unknown', 'thread_id': ident, 'reply': f'新对话已创建，thread ID={ident}；随后 read_thread 回读失败（{public_error_code(error)}）。首条任务可能已开始；请引用本条检查，不要重新创建。'}
         return {'state': 'confirmed', 'thread_id': ident, 'title': after.get('title'),
                 'reply': '对话已创建，首条任务已被原生入口接受；完成或出错后继续提醒。'}
