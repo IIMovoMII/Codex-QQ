@@ -111,7 +111,42 @@ class MessageSubmissionTests(unittest.TestCase):
                         {'requests': [{'id': 1}]}, {'runtime': {'type': 'notLoaded'}},
                         {'turn': {'status': 'mystery'}}):
             self.state = {**idle_state(), 'resumeState': 'resumed', **changes}
-            self.assertEqual(self.send()['state'], 'rejected')
+            with patch('control_backend.time.sleep'):
+                self.assertEqual(self.send()['state'], 'rejected')
+        self.queue.assert_not_called()
+        self.assertEqual(self.starts(), [])
+
+    def test_transient_resume_state_is_reread_before_rejecting(self):
+        loading = {**self.state, 'resumeState': 'needs_resume'}
+        ready = copy.deepcopy(self.state)
+        self.backend.snapshot = Mock(side_effect=[loading, ready, ready])
+        with patch('control_backend.time.sleep') as sleep:
+            result = self.send()
+        self.assertEqual(result['state'], 'confirmed')
+        self.assertEqual(result['mode'], 'started')
+        self.assertEqual(len(self.starts()), 1)
+        self.assertEqual(sleep.call_count, 1)
+        self.queue.assert_not_called()
+
+    def test_resume_state_that_never_finishes_stays_fail_closed(self):
+        loading = {**self.state, 'resumeState': 'needs_resume'}
+        self.backend.snapshot = Mock(side_effect=[loading] * 8)
+        with patch('control_backend.time.sleep') as sleep:
+            result = self.send()
+        self.assertEqual(result['state'], 'rejected')
+        self.assertIn('恢复或载入', result['reply'])
+        self.assertEqual(sleep.call_count, 5)
+        self.queue.assert_not_called()
+        self.assertEqual(self.starts(), [])
+
+    def test_pending_submission_stops_resume_retry(self):
+        pending = {**self.state, 'resumeState': 'needs_resume', 'pending': True}
+        self.backend.snapshot = Mock(return_value=pending)
+        with patch('control_backend.time.sleep') as sleep:
+            result = self.send()
+        self.assertEqual(result['state'], 'rejected')
+        self.assertIn('上一次提交尚未取得原生确认', result['reply'])
+        self.assertEqual(sleep.call_count, 0)
         self.queue.assert_not_called()
         self.assertEqual(self.starts(), [])
 

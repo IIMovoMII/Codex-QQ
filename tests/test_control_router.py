@@ -23,9 +23,13 @@ THREAD_B = "00000000-0000-7000-8000-000000000002"
 class FakeCatalog:
     def __init__(self):
         self.rows = {t: {"id": t, "name": "同名对话", "project_name": p} for t, p in ((THREAD_A, "甲"), (THREAD_B, "乙"))}
+        self.aliases = {}
 
     def thread(self, t):
         return self.rows.get(t)
+
+    def resolve_thread_id(self, t):
+        return self.aliases.get(t, t)
 
     def threads(self, **kwargs):
         return list(self.rows.values())
@@ -153,6 +157,62 @@ class ControlRouterTests(unittest.TestCase):
         self.send("引号测试", quote=a)
         self.assertIn("没有引用目标对话", self.send("新消息"))
         self.assertEqual(self.calls, [(THREAD_A, "引号测试")])
+
+    def test_durable_thread_card_routes_when_catalog_row_is_temporarily_missing(self):
+        card = self.send("/use " + THREAD_A)
+        del self.controller.catalog.rows[THREAD_A]
+        reply = self.send("继续", quote=card)
+        self.assertIn("已提交", reply)
+        self.assertEqual(self.calls, [(THREAD_A, "继续")])
+
+    def test_legacy_thread_notice_routes_by_exact_id_when_catalog_row_is_missing(self):
+        del self.controller.catalog.rows[THREAD_A]
+        reply = self.send("继续", quote=f"旧提醒\n对话编号：{THREAD_A}")
+        self.assertIn("已提交", reply)
+        self.assertEqual(self.calls, [(THREAD_A, "继续")])
+
+    def test_old_split_rollout_alias_is_canonicalized_before_native_dispatch(self):
+        alias = "00000000-0000-7000-8000-000000000099"
+        self.controller.catalog.aliases[alias] = THREAD_A
+        token = self.store.reference("test|qqbot:user|user", "thread", {"thread_id": alias})
+        reply = self.send("继续", quote=f"引用标识：{token}", message_id="split-rollout-alias")
+        self.assertIn("已提交", reply)
+        self.assertEqual(self.calls, [(THREAD_A, "继续")])
+
+    def test_missing_catalog_row_keeps_exact_reference_when_native_load_fails(self):
+        card = self.send("/use " + THREAD_A)
+        del self.controller.catalog.rows[THREAD_A]
+        self.backend.ensure_owner = lambda _thread: (_ for _ in ()).throw(DesktopControlError("no-client-found"))
+        self.backend.open_thread = lambda *_args: {
+            'state': 'rejected', 'reply': '原生对话无法载入，未发送。'}
+        reply = self.send("继续", quote=card)
+        self.assertIn("原生对话无法载入", reply)
+        self.assertNotIn("已选定", reply)
+        self.assertIn("引用标识：", reply)
+        self.assertEqual(self.calls, [])
+
+    def test_missing_catalog_row_loads_silently_before_routing_quoted_message(self):
+        card = self.send("/use " + THREAD_A)
+        del self.controller.catalog.rows[THREAD_A]
+        opened = []
+        owner_calls = []
+
+        def owner(thread):
+            owner_calls.append(thread)
+            if len(owner_calls) == 1:
+                raise DesktopControlError("no-client-found")
+
+        def open_thread(thread, connection, operation):
+            opened.append((thread, connection))
+            return {'state': 'confirmed'}
+
+        self.backend.ensure_owner = owner
+        self.backend.open_thread = open_thread
+        reply = self.send("继续", quote=card)
+        self.assertIn("已提交", reply)
+        self.assertNotIn("已选定", reply)
+        self.assertEqual(opened, [(THREAD_A, 'same-process')])
+        self.assertEqual(self.calls, [(THREAD_A, "继续")])
 
     def test_all_thread_operations_require_a_quote_even_with_legacy_selection(self):
         self.store.select("test|qqbot:user|user", THREAD_A)

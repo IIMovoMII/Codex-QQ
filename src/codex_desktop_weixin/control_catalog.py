@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import tomllib
 from datetime import datetime, timezone
@@ -10,6 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from control_actions import normalize_saved_queue
+
+
+_ROLLOUT_UUID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+_MAX_ALIAS_SCAN_FILES = 5000
+_MAX_SESSION_META_BYTES = 1024 * 1024
 
 
 class LocalCatalog:
@@ -133,6 +139,58 @@ class LocalCatalog:
         elif thread_id in projectless:
             row["project_id"], row["project_name"] = None, None
         return row
+
+    def resolve_thread_id(self, thread_id: str) -> str:
+        """Resolve a legacy split-rollout suffix to its stable Desktop session.
+
+        Older monitor versions took the final UUID from a filename such as
+        ``...-<session>_<rollout>.jsonl`` and put that rollout suffix in QQ
+        cards.  The suffix is not a Desktop thread ID.  Resolve it only when a
+        local Desktop session file proves the exact relationship; never use a
+        title, recency, or a guessed replacement conversation.
+        """
+        if not isinstance(thread_id, str) or not thread_id:
+            return thread_id
+        try:
+            if self.thread(thread_id) is not None:
+                return thread_id
+        except (OSError, sqlite3.Error, ValueError, TypeError, json.JSONDecodeError):
+            # A partially initialized/fixture catalog may not have the
+            # read-only state schema yet.  That must not disable the separate
+            # rollout-filename proof below; native routing remains fail-closed
+            # if no exact alias can be established.
+            pass
+        sessions = self.path.parent / "sessions"
+        if not sessions.exists():
+            return thread_id
+        wanted = thread_id.casefold()
+        candidates: set[str] = set()
+        try:
+            for index, path in enumerate(sessions.rglob("*.jsonl")):
+                if index >= _MAX_ALIAS_SCAN_FILES:
+                    break
+                ids = _ROLLOUT_UUID.findall(path.name)
+                if len(ids) < 2 or ids[-1].casefold() != wanted:
+                    continue
+                try:
+                    with path.open("rb") as stream:
+                        raw = stream.readline(_MAX_SESSION_META_BYTES + 1)
+                    if len(raw) > _MAX_SESSION_META_BYTES or not raw.endswith(b"\n"):
+                        continue
+                    record = json.loads(raw.decode("utf-8"))
+                    payload = record.get("payload") if isinstance(record, dict) else None
+                    canonical = payload.get("id") if isinstance(payload, dict) else None
+                    if (record.get("type") != "session_meta" or not isinstance(payload, dict)
+                            or payload.get("source") != "vscode"
+                            or not isinstance(canonical, str)
+                            or canonical.casefold() != ids[0].casefold()):
+                        continue
+                    candidates.add(canonical)
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+                    continue
+        except OSError:
+            return thread_id
+        return next(iter(candidates)) if len(candidates) == 1 else thread_id
 
     def models(self) -> dict[str, Any]:
         """Read the configured catalog, never substitute a hard-coded model list.

@@ -14,14 +14,29 @@ from unittest.mock import patch
 PACKAGE_DIR = Path(__file__).resolve().parents[1] / "src" / "codex_desktop_weixin"
 sys.path.insert(0, str(PACKAGE_DIR))
 
-from monitor import DesktopMonitor, MonitorConfig
+from monitor import DesktopMonitor, MonitorConfig, _migrate_session_aliases
 from models import Signal, SignalKind
 from process_watch import ProcessStatus
-from state_machine import MAX_RETAINED_TERMINAL_TURNS
+from state_machine import MAX_RETAINED_TERMINAL_TURNS, StateMachine
 from winwatch import DirectoryChange
 
 
 class ControlStatusIndexTests(unittest.TestCase):
+    def test_old_split_rollout_checkpoint_is_rebound_without_duplicate_active_turn(self):
+        canonical = '11111111-1111-7111-8111-111111111111'
+        alias = '22222222-2222-7222-8222-222222222222'
+        machine = StateMachine()
+        machine.apply(Signal(SignalKind.TURN_STARTED, session_id=canonical, turn_id='turn'))
+        checkpoint = machine.checkpoint()
+        duplicate = dict(checkpoint['turns'][0])
+        duplicate['session_id'] = alias
+        checkpoint['turns'].append(duplicate)
+
+        migrated = _migrate_session_aliases(checkpoint, {alias: canonical})
+        restored = StateMachine.from_checkpoint(migrated)
+        self.assertEqual(list(restored.turns), [(canonical, 'turn')])
+        self.assertEqual(restored.active_turn_by_session, {canonical: 'turn'})
+
     def test_only_state_changes_publish_minimal_status_without_prompt_text(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

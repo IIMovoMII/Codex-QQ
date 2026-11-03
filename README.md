@@ -139,6 +139,14 @@ QQ 的消息额度、频率和可见性受平台规则影响；“接口接受�
 
 开发与排错先看[长期维护入口](MAINTENANCE.md)，快速定位源码、测试与当前功能边界。
 
+日常快速回归（与 CI 相同）：
+
+~~~powershell
+py -3 -X utf8 -m unittest discover -s tests -p "test_smoke.py" -v
+~~~
+
+发布前全量隔离回归：
+
 ~~~powershell
 py -3 -X utf8 -m unittest discover -s tests -v
 ~~~

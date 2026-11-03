@@ -56,6 +56,10 @@ class CreationCommands:
             return ActionCommands(self.r, self.scope, self.connection)._once(operation_key,
                     lambda: {'reply': '已取消向导，没有创建对话或发送任务。旧向导卡片不再执行，请重新发送“新建对话”开始。', 'state': 'confirmed'})
         source = data.get('thread_id')
+        # Creating a child needs the source's project/permission snapshot. A
+        # durable reply can still send to its exact thread when the catalog is
+        # temporarily stale, but a creation wizard must fail closed if its
+        # origin can no longer be verified.
         if not source or not self.r.catalog.thread(source):
             return '原生调用来源已不可用，未创建。请引用一个已有对话重新开始。', 'rejected'
         if kind == 'creation_projects':

@@ -15,7 +15,7 @@ PACKAGE_DIR = Path(__file__).resolve().parents[1] / "src" / "codex_desktop_weixi
 sys.path.insert(0, str(PACKAGE_DIR))
 
 from models import SignalKind
-from tailer import IncrementalTailer, canonical_path_key
+from tailer import IncrementalTailer, canonical_path_key, session_id_from_path, session_alias_from_path
 
 
 def line(payload: dict, outer: str = "event_msg") -> bytes:
@@ -23,6 +23,37 @@ def line(payload: dict, outer: str = "event_msg") -> bytes:
 
 
 class TailerTests(unittest.TestCase):
+    def test_split_rollout_path_uses_stable_session_uuid(self) -> None:
+        path = Path(
+            'rollout-2026-10-26T03-20-51-01a173cd-989a-7171-bc80-be6cba54f7bb_'
+            '01a17482-2ef9-7d62-b14b-5a269108a008.jsonl'
+        )
+        self.assertEqual(session_id_from_path(path), '01a173cd-989a-7171-bc80-be6cba54f7bb')
+        self.assertEqual(session_alias_from_path(path), (
+            '01a17482-2ef9-7d62-b14b-5a269108a008',
+            '01a173cd-989a-7171-bc80-be6cba54f7bb',
+        ))
+
+    def test_reloading_old_split_cursor_migrates_session_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            transcript = root / (
+                'rollout-2026-10-26T03-20-51-01a173cd-989a-7171-bc80-be6cba54f7bb_'
+                '01a17482-2ef9-7d62-b14b-5a269108a008.jsonl'
+            )
+            transcript.write_bytes(b'')
+            state = root / 'cursors.json'
+            state.write_text(json.dumps({str(transcript): {
+                'offset': 0, 'identity': 0,
+                'session_id': '01a17482-2ef9-7d62-b14b-5a269108a008',
+            }}), encoding='utf-8')
+            tailer = IncrementalTailer(state)
+            cursor = tailer.cursor_for(transcript)
+            self.assertEqual(cursor.session_id, '01a173cd-989a-7171-bc80-be6cba54f7bb')
+            self.assertEqual(tailer.session_aliases(), {
+                '01a17482-2ef9-7d62-b14b-5a269108a008': '01a173cd-989a-7171-bc80-be6cba54f7bb',
+            })
+
     @unittest.skipUnless(os.name == 'nt', 'Windows short path aliases')
     def test_short_and_long_windows_paths_share_the_same_key(self):
         short = r'C:\Temp\EXAMPL~1\rollout.jsonl'

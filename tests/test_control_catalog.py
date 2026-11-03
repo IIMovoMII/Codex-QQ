@@ -12,6 +12,21 @@ from control_catalog import LocalCatalog
 
 
 class CatalogTests(unittest.TestCase):
+    def test_resolve_thread_id_only_maps_proven_split_rollout_suffix(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            sessions = root / 'sessions' / '2026' / '10' / '26'
+            sessions.mkdir(parents=True)
+            canonical = '11111111-1111-7111-8111-111111111111'
+            alias = '22222222-2222-7222-8222-222222222222'
+            path = sessions / f'rollout-2026-10-26T03-20-51-{canonical}_{alias}.jsonl'
+            path.write_text(json.dumps({'type': 'session_meta', 'payload': {
+                'id': canonical, 'source': 'vscode'}}) + '\n', encoding='utf-8')
+            catalog = LocalCatalog(root)
+            self.assertEqual(catalog.resolve_thread_id(alias), canonical)
+            self.assertEqual(catalog.resolve_thread_id('33333333-3333-7333-8333-333333333333'),
+                             '33333333-3333-7333-8333-333333333333')
+
     def test_saved_queue_is_bounded_readonly_and_not_all_history(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

@@ -169,6 +169,24 @@ class DesktopControlTests(unittest.TestCase):
             "response": {"canHandle": False},
         })
 
+    def test_client_discards_oversized_broadcast_before_small_response(self) -> None:
+        pipe = FakePipe()
+        oversized = {'value': True}
+        original_read = pipe.read
+
+        def read():
+            if oversized['value'] and pipe.writes and pipe.writes[-1].get('method') == 'small-read':
+                oversized['value'] = False
+                raise DesktopControlError('frame-too-large')
+            return original_read()
+
+        pipe.read = read
+        client = DesktopClient(pipe)
+        client.initialize()
+        response = client.request('small-read', {})
+        self.assertEqual(response['method'], 'small-read')
+        self.assertTrue(client.oversized_frame)
+
     def test_utf8_frames_count_bytes_and_round_trip_chinese_and_emoji(self) -> None:
         message = {"type": "request", "params": {"text": "暂停任务😀\n中文"}}
         frame = encode_frame(message)
@@ -180,10 +198,12 @@ class DesktopControlTests(unittest.TestCase):
 
     def test_invalid_frames_are_rejected_without_large_allocation(self) -> None:
         pipe = WindowsDesktopPipe.__new__(WindowsDesktopPipe)
-        with patch.object(pipe, "_read_exact", return_value=struct.pack("<I", MAX_FRAME_BYTES + 1)) as read:
+        with patch.object(pipe, "_read_exact", return_value=struct.pack("<I", MAX_FRAME_BYTES + 1)) as read, \
+                patch.object(pipe, "_discard_exact") as discard:
             with self.assertRaises(DesktopControlError):
                 pipe.read()
         read.assert_called_once_with(4)
+        discard.assert_called_once_with(MAX_FRAME_BYTES + 1)
 
 
 if __name__ == "__main__":

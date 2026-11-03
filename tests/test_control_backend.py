@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "codex_desktop_weixin"))
 from control_backend import NativeBackend
 from desktop_control import DesktopControlError
-from test_desktop_control import FakePipe, THREAD
+from test_desktop_control import FakePipe, THREAD, TURN
 
 UPDATE = "thread-follower-update-thread-settings"
 
@@ -138,6 +138,37 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(view['owner_id'], 'desktop-owner')
         self.assertEqual(view['model'], 'gpt-test')
         self.assertTrue(any(m.get('type') == 'broadcast' and not m['params']['following'] for m in pipe.writes))
+
+    def test_snapshot_falls_back_to_bounded_app_tool_when_full_frame_is_too_large(self):
+        class OversizedPipe(FakePipe):
+            def __init__(self):
+                super().__init__()
+                self.oversized = True
+
+            def read(self):
+                if (self.oversized and self.writes
+                        and self.writes[-1].get('method') == 'thread-follower-read-model-settings'):
+                    self.oversized = False
+                    raise DesktopControlError('frame-too-large')
+                return super().read()
+
+        class BoundedTools:
+            def call(self, *_args, **_kwargs):
+                return {'state': 'confirmed', 'data': {
+                    'thread': {'id': THREAD, 'hostId': 'local', 'kind': 'codex', 'cwd': 'D:/work'},
+                    'turns': [{'id': TURN, 'status': 'inProgress'}],
+                }}
+
+        pipe = OversizedPipe()
+        backend = NativeBackend(pipe_factory=lambda: pipe, app_tools=BoundedTools())
+        with patch.object(backend, 'probe', return_value=('same', 1.0)), \
+                patch.object(backend, 'read_settings', return_value={'model': 'gpt-test', 'effort': 'max',
+                                                                       'raw': {'resumeState': 'resumed', 'mode': 'default'}}):
+            view = backend.snapshot(THREAD, expected_connection='same')
+        self.assertFalse(view['snapshot_complete'])
+        self.assertEqual(view['runtime'], {'type': 'active'})
+        self.assertEqual(view['turn']['status'], 'inProgress')
+        self.assertEqual(view['owner_id'], 'desktop-owner')
 
 
 if __name__ == '__main__':

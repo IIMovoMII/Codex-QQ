@@ -16,6 +16,17 @@ from desktop_control import (DesktopClient, DesktopControlError, QUEUED_FOLLOWUP
 
 
 class NativeBackend:
+    # Desktop briefly publishes ``needs_resume`` while an opened conversation
+    # is hydrating.  Treating the first such snapshot as terminal made a QQ
+    # message fail even though the same conversation became ready moments
+    # later.  The retry is deliberately short and only applies to this known
+    # transient state; pending submissions and every other ambiguous state
+    # remain fail-closed.
+    # The Desktop UI can take several seconds to finish MCP/session
+    # hydration after a conversation becomes visible; keep the total wait
+    # bounded at roughly eight seconds while covering that normal window.
+    _SUBMISSION_RESUME_RETRY_DELAYS = (0.25, 0.5, 1.0, 2.0, 4.0)
+
     def __init__(self, *, pipe_factory: Any = WindowsDesktopPipe, contract_check: Any = None,
                  app_tools: Any = None, catalog: Any = None) -> None:
         self.pipe_factory = pipe_factory
@@ -77,39 +88,107 @@ class NativeBackend:
                 raise DesktopControlError('desktop-generation-changed-during-read')
 
     def snapshot(self, thread_id: str, expected_connection: str | None = None) -> dict[str, Any]:
+        try:
+            with self.pipe_factory() as pipe:
+                if hasattr(pipe, "deadline"):
+                    pipe.deadline = min(pipe.deadline, time.monotonic() + 3.0)
+                client = DesktopClient(pipe)
+                client.initialize()
+                self._check_connection(pipe, expected_connection)
+                owner = client.owner(thread_id)
+                client.following(thread_id, True, owner)
+                try:
+                    # A follower's owner discovery causes the owner to publish a snapshot.
+                    client.owner(thread_id)
+                    client.request("thread-follower-read-model-settings", {"conversationId": thread_id}, version=1, target_client_id=owner)
+                    if client.oversized_frame:
+                        raise DesktopControlError("frame-too-large")
+                    while True:
+                        event = client.broadcasts.get("thread-stream-state-changed", {})
+                        params = event.get("params", {})
+                        change = params.get("change", {})
+                        state = change.get("conversationState")
+                        if (params.get("conversationId") == thread_id and params.get('hostId') == 'local'
+                                and event.get('sourceClientId') == owner and event.get('version') == 11
+                                and change.get('type') == 'snapshot' and isinstance(state, dict)
+                                and state.get('id') == thread_id):
+                            self._check_connection(pipe, expected_connection)
+                            return {**self._view(state), 'owner_id': owner, 'snapshot_complete': True}
+                        frame = pipe.read()
+                        if frame.get("type") == "broadcast":
+                            client.broadcasts[str(frame.get("method"))] = frame
+                        elif frame.get("type") == "client-discovery-request":
+                            pipe.write({"type": "client-discovery-response", "requestId": frame.get("requestId"), "response": {"canHandle": False}})
+                finally:
+                    try:
+                        client.following(thread_id, False, owner)
+                    except (OSError, TimeoutError, DesktopControlError):
+                        pass
+        except DesktopControlError as error:
+            if str(error) != "frame-too-large":
+                raise
+            return self._bounded_snapshot(thread_id, expected_connection)
+
+    def _bounded_snapshot(self, thread_id: str, expected_connection: str | None = None) -> dict[str, Any]:
+        """Read only bounded native data when the full follower snapshot is huge.
+
+        Desktop's follower broadcast contains the entire transcript-backed state
+        and can exceed the pipe frame cap.  The app-tool read is deliberately
+        limited to one turn and no outputs; it is enough to distinguish a busy
+        turn from an idle one.  An incomplete bounded view is never treated as
+        proof that requests, queues, or permissions are empty.
+        """
+        identity, _ = self.probe()
+        if expected_connection is not None and identity != expected_connection:
+            raise DesktopControlError('desktop-generation-changed-during-read')
         with self.pipe_factory() as pipe:
-            if hasattr(pipe, "deadline"):
-                pipe.deadline = min(pipe.deadline, time.monotonic() + 3.0)
             client = DesktopClient(pipe)
             client.initialize()
             self._check_connection(pipe, expected_connection)
             owner = client.owner(thread_id)
-            client.following(thread_id, True, owner)
-            try:
-                # A follower's owner discovery causes the owner to publish a snapshot.
-                client.owner(thread_id)
-                client.request("thread-follower-read-model-settings", {"conversationId": thread_id}, version=1, target_client_id=owner)
-                while True:
-                    event = client.broadcasts.get("thread-stream-state-changed", {})
-                    params = event.get("params", {})
-                    change = params.get("change", {})
-                    state = change.get("conversationState")
-                    if (params.get("conversationId") == thread_id and params.get('hostId') == 'local'
-                            and event.get('sourceClientId') == owner and event.get('version') == 11
-                            and change.get('type') == 'snapshot' and isinstance(state, dict)
-                            and state.get('id') == thread_id):
-                        self._check_connection(pipe, expected_connection)
-                        return {**self._view(state), 'owner_id': owner}
-                    frame = pipe.read()
-                    if frame.get("type") == "broadcast":
-                        client.broadcasts[str(frame.get("method"))] = frame
-                    elif frame.get("type") == "client-discovery-request":
-                        pipe.write({"type": "client-discovery-response", "requestId": frame.get("requestId"), "response": {"canHandle": False}})
-            finally:
-                try:
-                    client.following(thread_id, False, owner)
-                except (OSError, TimeoutError, DesktopControlError):
-                    pass
+            self._check_connection(pipe, expected_connection)
+        result = self.native_tools().call(
+            'read_thread',
+            {'threadId': thread_id, 'turnLimit': 1, 'includeOutputs': False,
+             'maxOutputCharsPerItem': 0},
+            source_thread_id=thread_id, expected_identity=identity,
+            operation_id=uuid.uuid4().hex,
+        )
+        data = result.get('data') if isinstance(result, dict) else None
+        row = data.get('thread') if isinstance(data, dict) else None
+        turns = data.get('turns') if isinstance(data, dict) else None
+        if (result.get('state') != 'confirmed' or not isinstance(row, dict)
+                or row.get('id') != thread_id or row.get('hostId') != 'local'
+                or row.get('kind') != 'codex' or not isinstance(turns, list)
+                or len(turns) > 1):
+            raise DesktopControlError('bounded-snapshot-unavailable')
+        latest = turns[0] if turns else {}
+        status = latest.get('status') if isinstance(latest, dict) else None
+        if status not in ('inProgress', 'completed', 'failed', 'interrupted'):
+            raise DesktopControlError('bounded-snapshot-unavailable')
+        cwd = row.get('cwd')
+        if not isinstance(cwd, str) or not cwd:
+            raise DesktopControlError('bounded-snapshot-unavailable')
+        settings: dict[str, Any] = {}
+        try:
+            settings = self.read_settings(thread_id, expected_connection=identity)
+        except (DesktopControlError, OSError, TimeoutError, ValueError):
+            pass
+        raw = settings.get('raw') if isinstance(settings.get('raw'), dict) else {}
+        runtime = {'type': 'active' if status == 'inProgress' else 'idle'}
+        return {
+            'id': thread_id, 'model': settings.get('model'), 'effort': settings.get('effort'),
+            'settings': {}, 'permissions': {}, 'runtime': runtime,
+            'resumeState': raw.get('resumeState') or 'resumed',
+            'turn': {'id': latest.get('id'), 'turnId': latest.get('id'), 'status': status,
+                     'state': status, 'clientUserMessageId': None},
+            'requests': [], 'compactions': [], 'pending': False, 'cwd': cwd,
+            'collaboration_mode': None, 'goal_known': False, 'goal': None,
+            'workspace_roots': [cwd], 'async_questions': [],
+            'async_questions_unverified': True, 'accepted_submissions': [],
+            'mode': raw.get('mode'), 'thread_start_kind': None,
+            'owner_id': owner, 'snapshot_complete': False,
+        }
 
     def ensure_owner(self, thread_id: str) -> None:
         with self.pipe_factory() as pipe:
@@ -261,6 +340,26 @@ class NativeBackend:
                 '当前任务运行中，消息未发送、未排队。请等任务空闲后重发；'
                 '需要立即补充要求时，请显式发送“引导 内容”。'}
 
+    def _submission_state(self, thread_id: str, connection: str) -> dict:
+        """Read a submission boundary, waiting only for transient hydration.
+
+        ``needs_resume`` is emitted by Desktop while it is restoring a
+        conversation.  It is not safe to dispatch against that snapshot, but
+        it is also not a reason to make the user resend a message immediately.
+        Re-read until Desktop publishes a different state or the bounded
+        retry window expires.  A pending/unconfirmed submission stops the
+        retry immediately so an unknown prior mutation can never be bypassed.
+        """
+        state = self.control_state(thread_id, connection=connection)
+        if state.get('pending') or state.get('resumeState') != 'needs_resume':
+            return state
+        for delay in self._SUBMISSION_RESUME_RETRY_DELAYS:
+            time.sleep(delay)
+            state = self.control_state(thread_id, connection=connection)
+            if state.get('pending') or state.get('resumeState') != 'needs_resume':
+                return state
+        return state
+
     def preflight_guide_saved_queue_item(self, thread_id: str, entry: dict, catalog: Any,
                                          connection: str | None = None) -> dict:
         """Check the retryable busy/initializing cases before claiming an operation."""
@@ -306,7 +405,11 @@ class NativeBackend:
                 raise ValueError('invalid-message')
         except (ValueError, UnicodeError, TypeError):
             return {'state': 'rejected', 'reply': '消息或编号格式无效，未发送；请重新输入原文。'}
-        before = self.control_state(thread_id, connection=connection)
+        before = self._submission_state(thread_id, connection)
+        if (before.get('snapshot_complete') is False
+                and (before.get('turn') or {}).get('status') != 'inProgress'):
+            return {'state': 'rejected',
+                    'reply': '该对话状态过大，暂时无法完整核实；未发送、未排队。请先在 Desktop 打开该对话后重试。'}
         identity, _ = self.probe()
         if identity != connection:
             return {'state': 'rejected', 'reply': 'Codex 连接已变化，这条消息未发送；恢复后请重新发。'}
@@ -324,6 +427,10 @@ class NativeBackend:
         if route == 'stopping':
             return {'state': 'rejected', 'reply': '原生暂停仍在收尾，这条新消息未发送、未排队；待电脑显示停止后重新发。'}
         if route == 'unavailable':
+            if before.get('pending'):
+                return {'state': 'rejected', 'reply': '上一次提交尚未取得原生确认，未发送新消息、未排队；请先在电脑核对，不会自动重发。'}
+            if before.get('resumeState') != 'resumed':
+                return {'state': 'rejected', 'reply': 'Desktop 对话仍在恢复或载入，未发送新消息、未排队；请等电脑显示就绪后重发。'}
             return {'state': 'rejected', 'reply': '原生状态尚未就绪或上次提交未确认，未发送新消息、未排队。请先在电脑核对。'}
         if route == 'queued':
             return self.enqueue_native_follow_up(thread_id, text, connection, operation_id)
@@ -404,6 +511,8 @@ class NativeBackend:
     def fork_boundary(self, thread_id: str, connection: str) -> dict:
         from control_actions import signature
         state = self.control_state(thread_id, connection=connection)
+        if state.get('snapshot_complete') is False:
+            raise DesktopControlError('snapshot-incomplete')
         if (not state.get('goal_known') or state.get('goal') is not None or state.get('pending')
                 or state['turn'].get('status') != 'completed' or state.get('requests')
                 or (state.get('runtime') or {}).get('type') == 'active'):
@@ -627,6 +736,9 @@ class NativeBackend:
         self.require_extended_contract()
         from control_actions import request_payload, signature, REQUEST_METHODS
         state = self.snapshot(data['thread_id'], expected_connection=data.get('connection'))
+        if state.get('snapshot_complete') is False:
+            return {'state': 'rejected',
+                    'reply': '该对话状态过大，暂时无法完整核实待办；未发送回答。请先在 Desktop 打开该对话后重试。'}
         if state['owner_id'] != data['owner_id']:
             return {'state': 'rejected', 'reply': '原请求的窗口所有者已变化，请重新查询待办。'}
         matches = [r for r in state['requests'] if isinstance(r, dict) and r.get('id') == data['request_id'] and r.get('method') == data['method']]
@@ -657,6 +769,9 @@ class NativeBackend:
                 or changes['sandboxPolicy'].get('type') not in ('readOnly', 'workspaceWrite', 'dangerFullAccess')):
             return {'state': 'rejected', 'reply': '权限组合不合法，未修改。'}
         before = self.snapshot(thread_id, expected_connection=connection)
+        if before.get('snapshot_complete') is False:
+            return {'state': 'rejected',
+                    'reply': '该对话状态过大，暂时无法完整核实权限；未修改。请先在 Desktop 打开该对话后重试。'}
         from control_actions import signature
         current = before.get('settings') or {}
         effective = {**(before.get('permissions') or {}), **{k: v for k, v in current.items()
@@ -681,6 +796,9 @@ class NativeBackend:
 
     def compact(self, thread_id: str, connection: str | None = None) -> dict:
         before = self.control_state(thread_id, connection=connection)
+        if before.get('snapshot_complete') is False:
+            return {'state': 'rejected',
+                    'reply': '该对话状态过大，暂时无法完整核实压缩边界；未压缩。请先在 Desktop 打开该对话后重试。'}
         if (before['turn'].get('status') == 'inProgress' or before.get('pending')
                 or (before.get('runtime') or {}).get('type') == 'active' or before['requests']):
             return {'state': 'rejected', 'reply': '对话正在运行或等待处理，未压缩。请等本轮结束后再试。'}

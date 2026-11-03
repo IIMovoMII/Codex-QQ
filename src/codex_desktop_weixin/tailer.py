@@ -14,7 +14,7 @@ from rollout import parse_rollout_line
 from runtime_io import append_json_line, atomic_write_json
 
 
-_SESSION_ID_PATTERN = re.compile(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?=\.jsonl$)", re.IGNORECASE)
+_UUID_PATTERN = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
 _COLD_CURSOR_RETENTION = 30 * 86400
 _MAX_COLD_CURSORS = 20000
 
@@ -37,8 +37,30 @@ def canonical_path_key(path: str | Path) -> str:
 
 
 def session_id_from_path(path: Path) -> str:
-    match = _SESSION_ID_PATTERN.search(path.name)
-    return match.group(1) if match else path.stem
+    # Desktop can split one conversation into files named
+    # ``...-<session_id>_<rollout_id>.jsonl``.  The first UUID is the stable
+    # conversation/session identity; the trailing UUID is only a rollout
+    # segment identifier.  Taking the last UUID routes notifications to a
+    # non-existent conversation and makes native identity verification fail.
+    match = _UUID_PATTERN.search(path.name)
+    return match.group(0) if match else path.stem
+
+
+def session_alias_from_path(path: Path) -> tuple[str, str] | None:
+    """Return ``(alias, session_id)`` for a split Desktop rollout filename."""
+    matches = _UUID_PATTERN.findall(path.name)
+    if len(matches) < 2:
+        return None
+    return matches[-1], matches[0]
+
+
+def _cursor_session_id(path: Path, saved: object) -> str:
+    """Migrate old split-file cursors without overriding custom test paths."""
+    # A two-UUID Desktop filename is authoritative even when an older cursor
+    # persisted the trailing rollout/turn identifier as ``session_id``.
+    if session_alias_from_path(path) is not None:
+        return session_id_from_path(path)
+    return str(saved or session_id_from_path(path))
 
 
 @dataclass
@@ -87,7 +109,7 @@ class IncrementalTailer:
                 candidate = Cursor(
                     offset=max(0, int(value.get("offset", 0))),
                     identity=int(value.get("identity", 0)),
-                    session_id=str(value.get("session_id") or session_id_from_path(Path(path))),
+                    session_id=_cursor_session_id(Path(path), value.get("session_id")),
                     turn_id=value.get('turn_id') if isinstance(value.get('turn_id'), str) else None,
                     skipping_oversized_line=bool(value.get('skipping_oversized_line', False)),
                     context_incomplete=bool(value.get('context_incomplete', False)),
@@ -248,7 +270,7 @@ class IncrementalTailer:
             cursor = Cursor(
                 offset=max(0, int(value.get('offset', 0))),
                 identity=int(value.get('identity', 0)),
-                session_id=str(value.get('session_id') or session_id_from_path(Path(key))),
+                session_id=_cursor_session_id(Path(key), value.get('session_id')),
                 turn_id=value.get('turn_id') if isinstance(value.get('turn_id'), str) else None,
                 skipping_oversized_line=bool(value.get('skipping_oversized_line', False)),
                 context_incomplete=bool(value.get('context_incomplete', False)),
@@ -329,6 +351,18 @@ class IncrementalTailer:
 
     def known_paths(self) -> list[Path]:
         return [Path(path) for path in self.cursors]
+
+    def session_aliases(self) -> dict[str, str]:
+        """Return stale split-file IDs that can be mapped to stable sessions."""
+        aliases: dict[str, str] = {}
+        for path in self.cursors:
+            pair = session_alias_from_path(Path(path))
+            if pair is None:
+                continue
+            alias, session = pair
+            if alias.casefold() != session.casefold():
+                aliases[alias] = session
+        return aliases
 
     def read_new_signals(self, path: Path, *, max_bytes: int = 32 * 1024 * 1024,
                          persist: bool = True) -> list[Signal]:

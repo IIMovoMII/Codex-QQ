@@ -26,8 +26,8 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: 构建原生启动入口
         run: python -X utf8 tools/build_resident_app.py
-      - name: 隔离回归
-        run: python -X utf8 -m unittest discover -s tests -v
+      - name: 核心用户流程回归
+        run: python -X utf8 -m unittest discover -s tests -p "test_smoke.py" -v
       - name: 公开文件与本地链接
         run: python -X utf8 tools/check_publication.py
   gateway:

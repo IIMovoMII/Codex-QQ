@@ -169,6 +169,11 @@ class ControlRouter:
                     outcome, reply = 'rejected', '无法连接该对话的当前窗口：聊天记录存在，但没有可响应的窗口所有者（未载入、切换窗口或正在重连）。请在电脑点开这个对话后重发；本条不会以后补执行。'
                 elif str(error) == 'request-version-mismatch':
                     outcome, reply = 'rejected', '该操作的原生接口版本不匹配；不是聊天记录丢失，也不能靠换对话解决。未执行，请更新桥接适配。'
+                elif str(error) in ('frame-too-large', 'frame-too-large-unrecoverable',
+                                    'bounded-snapshot-unavailable', 'snapshot-incomplete'):
+                    outcome, reply = ('rejected',
+                                      '目标对话状态过大或暂时无法完整核实，未发送、未排队、未执行。'
+                                      '请先在 Desktop 打开该对话后重试。')
                 else:
                     outcome, reply = 'unknown', '原生控制状态或返回结果无法核实，不能认定是对话未打开。不会自动重发，请在电脑核对；已有聊天记录未修改。'
             else:
@@ -215,27 +220,71 @@ class ControlRouter:
                           f"💬 已选定 {self.catalog.label(row)}\n\n引用本条，说说接下来要做什么。\n这条回执以后也能用；每次操作都请引用目标。" +
                           (f"\n窗口状态：{status}" if status else ''))
 
-    def _selected_thread_card(self, scope: str, row: dict, connection: str) -> tuple[str, str]:
-        """Only an explicit selection opens an unloaded chat; lists stay read-only."""
+    @staticmethod
+    def _reference_thread_row(thread_id: str) -> dict[str, Any]:
+        """Minimal display metadata for a durable reference absent from the catalog.
+
+        A thread token is already scoped and was created by this router.  The
+        catalog is a display/index view and may lag Desktop's native history;
+        it must not replace the explicit thread identity with a guessed one.
+        Native owner/open checks remain authoritative before any operation.
+        """
+        return {
+            'id': thread_id,
+            'name': '原对话',
+            'project_id': None,
+            'project_name': None,
+            'cwd': None,
+            'model': None,
+            'reasoning_effort': None,
+            'approval_mode': None,
+            'sandbox_policy': '{}',
+            'source': 'reference',
+            'agent_role': None,
+        }
+
+    def _ensure_thread_loaded(self, row: dict, connection: str) -> tuple[str, str]:
+        """Ensure the exact referenced thread has a native owner.
+
+        The selection command may show a selection card while it opens a
+        thread. A quoted task already has its target, so callers must receive
+        only a load status and must never be turned into a new selection
+        interaction.
+        """
         thread_id = row['id']
         try:
             self.backend.ensure_owner(thread_id)
-            return self._thread_card(scope, row, '已连接。', connection), 'confirmed'
+            return '已连接。', 'confirmed'
         except (OSError, TimeoutError, DesktopControlError):
             pass
         result = self.backend.open_thread(thread_id, connection, str(uuid.uuid4()))
         if result['state'] != 'confirmed':
-            return self._thread_card(scope, row, result['reply'], connection), result['state']
+            return str(result.get('reply') or '原生对话无法载入，未发送。'), result['state']
         deadline = time.monotonic() + 3.0
         while True:
             try:
                 self.backend.ensure_owner(thread_id)
-                return self._thread_card(scope, row, '已打开并连接。', connection), 'confirmed'
+                return '已打开并连接。', 'confirmed'
             except (OSError, TimeoutError, DesktopControlError):
                 if time.monotonic() >= deadline:
-                    return (self._thread_card(scope, row,
-                            '已请求打开，但尚未确认连接。请稍后引用本卡片再发；当前没有发送任务。', connection), 'unknown')
+                    return '已请求打开，但尚未确认连接。请稍后引用本条回执再发；当前没有发送任务。', 'unknown'
                 time.sleep(0.1)
+
+    def _selected_thread_card(self, scope: str, row: dict, connection: str) -> tuple[str, str]:
+        """Only an explicit selection opens an unloaded chat; lists stay read-only."""
+        status, state = self._ensure_thread_loaded(row, connection)
+        return self._thread_card(scope, row, status, connection), state
+
+    def _thread_route_failure(self, scope: str, row: dict, detail: str,
+                              connection: str) -> str:
+        """Return a retryable failure receipt without pretending to select."""
+        detail = detail.strip() or '原生对话无法载入，未发送。'
+        return self._card(
+            scope,
+            'thread',
+            {'thread_id': row['id'], 'connection': connection},
+            f"{self.catalog.label(row)}\n\n{detail}\n\n未发送；引用本条可按同一对话重试，不会改用其他对话。",
+        )
 
     def _list_card(self, scope: str, kind: str, rows: list[dict], title: str,
                    offset: int = 0, connection: str | None = None) -> str:
@@ -289,6 +338,24 @@ class ControlRouter:
             raise ValueError("missing-reference")
         return None
 
+    def _canonicalize_reference(self, ref: dict | None) -> dict | None:
+        """Repair only a locally proven split-rollout alias in old cards."""
+        if not isinstance(ref, dict) or not isinstance(ref.get('data'), dict):
+            return ref
+        thread_id = ref['data'].get('thread_id')
+        if not isinstance(thread_id, str) or not thread_id:
+            return ref
+        resolver = getattr(self.catalog, 'resolve_thread_id', None)
+        if resolver is None:
+            return ref
+        try:
+            canonical = resolver(thread_id)
+        except (OSError, sqlite3.Error, ValueError, TypeError, json.JSONDecodeError):
+            return ref
+        if not isinstance(canonical, str) or not canonical or canonical == thread_id:
+            return ref
+        return {**ref, 'data': {**ref['data'], 'thread_id': canonical}}
+
     def _dispatch(self, scope: str, meta: dict) -> tuple[str, str]:
         text = meta["text"].strip()
         quote = meta.get("quoted_text") or ""
@@ -305,6 +372,7 @@ class ControlRouter:
             )
         except ValueError:
             return "引用信息不完整或已过期，请发送“对话”重新选择；不会猜测目标。", "rejected"
+        ref = self._canonicalize_reference(ref)
         # A target is valid only for this incoming quotation. Never route an
         # unquoted command using a remembered selection from an earlier message.
         thread_id = ref["data"].get("thread_id") if ref and isinstance(ref["data"], dict) else None
@@ -361,9 +429,7 @@ class ControlRouter:
             if text == "下一页":
                 if not data.get("remaining"):
                     return "这份选项已经没有下一页。", "confirmed"
-                row = self.catalog.thread(thread_id)
-                if not row:
-                    return "目标对话已不在可控制列表，请重新选择。", "rejected"
+                row = self.catalog.thread(thread_id) or self._reference_thread_row(thread_id)
                 return self._setting_options_card(scope, row, data["field"], data["baseline"], data["remaining"], data["source"],
                                                   data.get("offset", 0) + len(data["options"]), meta['_desktop_identity']), "confirmed"
             if text == "取消":
@@ -420,14 +486,22 @@ class ControlRouter:
         if command == "新建对话":
             if not thread_id or kind not in ('thread', 'settings'):
                 return '请引用一个已有对话的回执发送“新建对话 [标题]”，再选择新项目和首条任务。已有对话只作原生调用来源，不会在里面执行新任务。', 'rejected'
-            if not self.catalog.thread(thread_id):
-                return '原生调用来源已不可用，请重新选择。', 'rejected'
             return creation.begin(thread_id, arg)
         if not thread_id:
             return NEEDS_QUOTE, "rejected"
         if command in ('删除', '压缩状态', '确认创建', '确认分支'):
             return '请引用对应的操作或确认卡片，不能用普通对话卡片代替；没有发送新任务。', 'rejected'
         row = self.catalog.thread(thread_id)
+        if not row and kind == 'thread':
+            # A long-lived thread card remains an exact route even when the
+            # read-only catalog has not caught up or no longer lists the row.
+            # Try the native load/owner path before allowing the operation;
+            # failure is reported by the native boundary, never remapped to a
+            # same-title conversation.
+            row = self._reference_thread_row(thread_id)
+            load_detail, load_state = self._ensure_thread_loaded(row, meta['_desktop_identity'])
+            if load_state != 'confirmed':
+                return self._thread_route_failure(scope, row, load_detail, meta['_desktop_identity']), load_state
         if not row:
             return "目标对话不存在或不属于可控制的本地对话，请重新选择。", "rejected"
         if kind == "thread" and not text:
@@ -523,9 +597,7 @@ class ControlRouter:
 
     def _change_model_settings(self, scope: str, thread_id: str, changes: dict,
                                expected: dict, connection: str) -> tuple[str, str]:
-        row = self.catalog.thread(thread_id)
-        if not row:
-            return "目标对话已不在可控制列表，未修改。", "rejected"
+        row = self.catalog.thread(thread_id) or self._reference_thread_row(thread_id)
         try:
             catalog = self.catalog.models()
         except (OSError, ValueError, KeyError, TypeError):

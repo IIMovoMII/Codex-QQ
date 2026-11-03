@@ -52,6 +52,84 @@ MAX_RECENT_TRANSCRIPTS = 1000
 MAX_RECENT_SCAN_ENTRIES = 10000
 
 
+def _migrate_session_aliases(checkpoint: dict | None, aliases: dict[str, str]) -> dict | None:
+    """Move old split-rollout session keys onto the stable Desktop session.
+
+    Before the filename parser understood ``session_rollout.jsonl``, the
+    trailing rollout UUID became a second session in the reducer.  Keep the
+    canonical row when both identities describe the same turn; this prevents
+    a stale duplicate from remaining active after a monitor restart.
+    """
+    if not isinstance(checkpoint, dict) or not aliases:
+        return checkpoint
+    alias_map = {str(key).casefold(): str(value) for key, value in aliases.items()}
+
+    def canonical(value: object) -> object:
+        return alias_map.get(value.casefold(), value) if isinstance(value, str) else value
+
+    migrated = copy.deepcopy(checkpoint)
+    turns = checkpoint.get('turns')
+    if isinstance(turns, list):
+        chosen: dict[tuple[object, object], tuple[int, int, dict]] = {}
+        for index, saved in enumerate(turns):
+            if not isinstance(saved, dict):
+                continue
+            row = dict(saved)
+            original = row.get('session_id')
+            row['session_id'] = canonical(original)
+            key = (row.get('session_id'), row.get('turn_id'))
+            rank = 0 if row.get('session_id') == original else 1
+            previous = chosen.get(key)
+            if previous is None or rank < previous[0]:
+                chosen[key] = (rank, index, row)
+        migrated['turns'] = [item[2] for item in sorted(chosen.values(), key=lambda item: item[1])]
+
+    context = checkpoint.get('context')
+    if isinstance(context, dict):
+        merged: dict = {}
+        for session, value in context.items():
+            target = canonical(session)
+            if target not in merged or target == session:
+                merged[target] = value
+            elif isinstance(value, dict) and isinstance(merged[target], dict):
+                merged[target] = {**value, **{key: old for key, old in merged[target].items() if old}}
+        migrated['context'] = merged
+
+    retired = checkpoint.get('retired')
+    if isinstance(retired, list):
+        seen: set[tuple[object, object]] = set()
+        rows = []
+        for item in retired:
+            if not isinstance(item, (list, tuple)) or len(item) != 2:
+                continue
+            key = (canonical(item[0]), item[1])
+            if key not in seen:
+                seen.add(key)
+                rows.append(list(key))
+        migrated['retired'] = rows
+
+    watermarks = checkpoint.get('watermarks')
+    if isinstance(watermarks, dict):
+        merged_watermarks: dict[str, str] = {}
+        for session, stamp in watermarks.items():
+            target = canonical(session)
+            old = merged_watermarks.get(target)
+            if old is None:
+                merged_watermarks[target] = stamp
+                continue
+            try:
+                if datetime.fromisoformat(str(stamp)) > datetime.fromisoformat(str(old)):
+                    merged_watermarks[target] = stamp
+            except (TypeError, ValueError):
+                # Preserve the canonical row when malformed historical data is
+                # encountered; StateMachine will still fail closed on invalid
+                # checkpoint content rather than inventing a timestamp.
+                if session == target:
+                    merged_watermarks[target] = stamp
+        migrated['watermarks'] = merged_watermarks
+    return migrated
+
+
 @dataclass(frozen=True)
 class MonitorConfig:
     codex_home: Path
@@ -71,7 +149,8 @@ class DesktopMonitor:
         self.config = config
         self.paths = ensure_runtime_dirs(config.data_dir)
         self.tailer = IncrementalTailer(self.paths["state"] / "cursors.json")
-        self.machine = StateMachine.from_checkpoint(self.tailer.checkpoint) if self.tailer.checkpoint is not None else StateMachine()
+        checkpoint = _migrate_session_aliases(self.tailer.checkpoint, self.tailer.session_aliases())
+        self.machine = StateMachine.from_checkpoint(checkpoint) if checkpoint is not None else StateMachine()
         self.tailer.checkpoint = self.machine.checkpoint()
         self.notifier = NotificationDispatcher(self.paths["root"])
         self.metadata = ThreadMetadataResolver(config.codex_home)

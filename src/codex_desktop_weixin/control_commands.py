@@ -10,6 +10,7 @@ import uuid
 import inspect
 
 from control_actions import SUPPORTED_REQUESTS, describe_request, request_reference, signature
+from desktop_control import DesktopControlError
 
 
 class ActionCommands:
@@ -53,6 +54,13 @@ class ActionCommands:
             return method(*args, connection)
         return method(*args)
 
+    @staticmethod
+    def _complete_snapshot_guard(state: dict, what: str = '操作') -> tuple[str, str] | None:
+        if state.get('snapshot_complete') is False:
+            return (f'该对话状态过大，暂时无法完整核实{what}；未执行。'
+                    '请先在 Desktop 打开该对话后重试。', 'rejected')
+        return None
+
     def command(self, thread_id: str, command: str, arg: str) -> tuple[str, str] | None:
         if command == '引导':
             if not arg:
@@ -71,6 +79,10 @@ class ActionCommands:
                 baseline = self.r.backend.fork_boundary(thread_id, self.connection)
             except (ValueError, OSError, TimeoutError):
                 return '当前对话或分支边界无法核实，未分支；请恢复连接后重试。', 'rejected'
+            except DesktopControlError as error:
+                if str(error) == 'snapshot-incomplete':
+                    return '该对话状态过大，暂时无法完整核实分支边界；未分支。请先在 Desktop 打开该对话后重试。', 'rejected'
+                return '目前只允许空闲、最近一轮已完成且无自动目标的对话分支。原生边界尚无法核实时，请先在电脑打开并核对对话。', 'rejected'
             except Exception:
                 return '目前只允许空闲、最近一轮已完成且无自动目标的对话分支。原生边界尚无法核实时，请先在电脑打开并核对对话。', 'rejected'
             row = self.r.catalog.thread(thread_id)
@@ -104,6 +116,9 @@ class ActionCommands:
                               '本地已保存的排队记录（可能不含服务端队列；状态以原生处理为准）'), 'confirmed'
         if command in ('待办', '问题', '审批'):
             state = self._backend_call('control_state', thread_id, connection=self.connection)
+            guarded = self._complete_snapshot_guard(state, '待办')
+            if guarded:
+                return guarded
             entries, unsupported = [], int(bool(state.get('async_questions_unverified')))
             for request in state['requests'][:30]:
                 try:
@@ -127,6 +142,9 @@ class ActionCommands:
             return self._list('request_list', thread_id, entries, note), 'confirmed'
         if command == '权限':
             state = self._backend_call('control_state', thread_id, connection=self.connection)
+            guarded = self._complete_snapshot_guard(state, '权限')
+            if guarded:
+                return guarded
             effective = self._permissions(state)
             profile = effective.get('activePermissionProfile')
             if profile and (not isinstance(profile, dict) or not str(profile.get('id', '')).startswith(':')):
@@ -197,11 +215,13 @@ class ActionCommands:
         # “待办” card; all mutating/action cards must carry the token.
         if kind != 'async_notice' and data.get('connection') != self.connection:
             return '这张操作卡片来自旧连接，已过期。请重新查看目标对话；不会补执行。', 'rejected'
-        if not self.r.catalog.thread(thread_id):
-            return '目标对话已不在可控制列表；未操作。', 'rejected'
+        # The catalog is a display/index view. A durable, scoped card may
+        # outlive its row; native owner and request checks below remain the
+        # authority for every operation.
+        row = self.r.catalog.thread(thread_id) or self.r._reference_thread_row(thread_id)
         if kind == 'submission':
             if text == '对话':
-                return self.r._thread_card(self.scope, self.r.catalog.thread(thread_id), connection=self.connection), 'confirmed'
+                return self.r._thread_card(self.scope, row, connection=self.connection), 'confirmed'
             if text in ('状态', '队列'):
                 from submission_receipts import status_text
                 observed = self.r.backend.submission_status(data, self.r.catalog, self.connection)
@@ -232,6 +252,9 @@ class ActionCommands:
                                             'operation_id': uuid.uuid4().hex},
                                  f"待发送记录：{entry['summary']}\n状态：{self.queue_status(entry['status'])}\n回复“引导”会先删除这条排队消息，再把相同正文引导给当前运行任务；回复“删除”只移除它。"), 'confirmed'
             state = self._backend_call('control_state', thread_id, connection=self.connection)
+            guarded = self._complete_snapshot_guard(state, '待办')
+            if guarded:
+                return guarded
             if entry.get('kind') == 'async_question':
                 return self._async_card(entry, state)
             request = self._find_request(entry, state)
@@ -241,7 +264,7 @@ class ActionCommands:
         if kind == 'queued':
             entry = data['entry']
             if text == '对话':
-                return self.r._thread_card(self.scope, self.r.catalog.thread(thread_id), connection=self.connection), 'confirmed'
+                return self.r._thread_card(self.scope, row, connection=self.connection), 'confirmed'
             if text in ('队列', '状态'):
                 return self.command(thread_id, '队列', '')
             if text == '删除':
@@ -266,6 +289,9 @@ class ActionCommands:
             return '这项操作来自旧连接，已过期。请重新查看对应选项或待办。', 'rejected'
         if kind == 'async_question':
             state = self._backend_call('control_state', thread_id, connection=self.connection)
+            guarded = self._complete_snapshot_guard(state, '待办')
+            if guarded:
+                return guarded
             current = self._async_find(data, state)
             if current is None:
                 return '这批异步问题已回答、结束或发生变化，请重新查看待办；未发送新任务。', 'rejected'

@@ -19,6 +19,10 @@ from typing import Any
 
 PIPE_PATH = r"\\.\pipe\codex-ipc"
 MAX_FRAME_BYTES = 8 * 1024 * 1024
+# A large broadcast can be discarded in bounded chunks so a following small
+# response remains readable.  Frames beyond this limit close the short-lived
+# pipe instead of spending unbounded time draining attacker-controlled data.
+MAX_DISCARD_FRAME_BYTES = 64 * 1024 * 1024
 STOP_METHOD = "thread-follower-interrupt-turn"
 # 无 expectedTurnId 的本地 user-stop 请求使用当前协议声明的版本。
 STOP_VERSION = 3
@@ -91,9 +95,19 @@ class WindowsDesktopPipe:
             length -= len(data)
         return b"".join(parts)
 
+    def _discard_exact(self, length: int) -> None:
+        while length:
+            chunk = min(length, 64 * 1024)
+            self._read_exact(chunk)
+            length -= chunk
+
     def read(self) -> dict[str, Any]:
         length = struct.unpack("<I", self._read_exact(4))[0]
         if not 0 < length <= MAX_FRAME_BYTES:
+            if length <= MAX_DISCARD_FRAME_BYTES:
+                self._discard_exact(length)
+            else:
+                raise DesktopControlError("frame-too-large-unrecoverable")
             raise DesktopControlError("frame-too-large")
         message = json.loads(self._read_exact(length).decode("utf-8", errors="strict"))
         if not isinstance(message, dict):
@@ -123,6 +137,7 @@ class DesktopClient:
         self.pipe = pipe
         self.client_id = "initializing-client"
         self.broadcasts: dict[str, dict[str, Any]] = {}
+        self.oversized_frame = False
 
     def request(
         self, method: str, params: dict[str, Any], *, version: int = 0,
@@ -138,7 +153,16 @@ class DesktopClient:
             message["targetClientId"] = target_client_id
         self.pipe.write(message)
         while True:
-            response = self.pipe.read()
+            try:
+                response = self.pipe.read()
+            except DesktopControlError as error:
+                # A large unsolicited broadcast must not hide the small RPC
+                # response that follows it.  WindowsDesktopPipe has already
+                # drained the bounded frame before raising this marker.
+                if str(error) == "frame-too-large":
+                    self.oversized_frame = True
+                    continue
+                raise
             if response.get("type") == "client-discovery-request":
                 # 本客户端不拥有任何 Desktop 对话，不能让其他窗口把任务交给它。
                 self.pipe.write({
