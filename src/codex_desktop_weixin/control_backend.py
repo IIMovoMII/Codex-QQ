@@ -133,10 +133,11 @@ class NativeBackend:
         """Read only bounded native data when the full follower snapshot is huge.
 
         Desktop's follower broadcast contains the entire transcript-backed state
-        and can exceed the pipe frame cap.  The app-tool read is deliberately
-        limited to one turn and no outputs; it is enough to distinguish a busy
-        turn from an idle one.  An incomplete bounded view is never treated as
-        proof that requests, queues, or permissions are empty.
+        and can exceed the pipe frame cap. The app-tool read is limited to one
+        turn and no outputs. It can authorize only a normal new turn when the
+        native thread status and latest turn agree that the conversation is
+        idle; request, queue, permission, and history controls still require a
+        complete follower snapshot.
         """
         identity, _ = self.probe()
         if expected_connection is not None and identity != expected_connection:
@@ -166,6 +167,15 @@ class NativeBackend:
         status = latest.get('status') if isinstance(latest, dict) else None
         if status not in ('inProgress', 'completed', 'failed', 'interrupted'):
             raise DesktopControlError('bounded-snapshot-unavailable')
+        native_status = row.get('status')
+        status_type = native_status.get('type') if isinstance(native_status, dict) else None
+        active_flags = native_status.get('activeFlags', []) if isinstance(native_status, dict) else None
+        if (status_type not in ('active', 'idle') or not isinstance(active_flags, list)
+                or any(not isinstance(flag, str) for flag in active_flags) or active_flags):
+            raise DesktopControlError('bounded-snapshot-unavailable')
+        if ((status_type == 'idle' and status not in ('completed', 'failed', 'interrupted'))
+                or (status_type == 'active' and status != 'inProgress')):
+            raise DesktopControlError('bounded-snapshot-unavailable')
         cwd = row.get('cwd')
         if not isinstance(cwd, str) or not cwd:
             raise DesktopControlError('bounded-snapshot-unavailable')
@@ -175,11 +185,13 @@ class NativeBackend:
         except (DesktopControlError, OSError, TimeoutError, ValueError):
             pass
         raw = settings.get('raw') if isinstance(settings.get('raw'), dict) else {}
-        runtime = {'type': 'active' if status == 'inProgress' else 'idle'}
+        resume_state = raw.get('resumeState') if isinstance(raw.get('resumeState'), str) else 'unknown'
+        idle_safe = status_type == 'idle' and resume_state == 'resumed'
+        runtime = {'type': status_type}
         return {
             'id': thread_id, 'model': settings.get('model'), 'effort': settings.get('effort'),
             'settings': {}, 'permissions': {}, 'runtime': runtime,
-            'resumeState': raw.get('resumeState') or 'resumed',
+            'resumeState': resume_state,
             'turn': {'id': latest.get('id'), 'turnId': latest.get('id'), 'status': status,
                      'state': status, 'clientUserMessageId': None},
             'requests': [], 'compactions': [], 'pending': False, 'cwd': cwd,
@@ -188,6 +200,7 @@ class NativeBackend:
             'async_questions_unverified': True, 'accepted_submissions': [],
             'mode': raw.get('mode'), 'thread_start_kind': None,
             'owner_id': owner, 'snapshot_complete': False,
+            'bounded_idle_safe': idle_safe,
         }
 
     def ensure_owner(self, thread_id: str) -> None:
@@ -407,6 +420,7 @@ class NativeBackend:
             return {'state': 'rejected', 'reply': '消息或编号格式无效，未发送；请重新输入原文。'}
         before = self._submission_state(thread_id, connection)
         if (before.get('snapshot_complete') is False
+                and not before.get('bounded_idle_safe')
                 and (before.get('turn') or {}).get('status') != 'inProgress'):
             return {'state': 'rejected',
                     'reply': '该对话状态过大，暂时无法完整核实；未发送、未排队。请先在 Desktop 打开该对话后重试。'}
@@ -423,6 +437,10 @@ class NativeBackend:
             current = self.snapshot(thread_id, expected_connection=connection)
             if current['owner_id'] != before['owner_id']:
                 return {'state': 'rejected', 'reply': '对话所有者已变化，未发送。请恢复连接后重新发。'}
+            if (current.get('snapshot_complete') is False
+                    and not current.get('bounded_idle_safe')):
+                return {'state': 'rejected',
+                        'reply': '对话状态在提交前变得不明确，未发送、未排队；请重新查看后再发。'}
             before, route = current, self._message_route(current)
         if route == 'stopping':
             return {'state': 'rejected', 'reply': '原生暂停仍在收尾，这条新消息未发送、未排队；待电脑显示停止后重新发。'}

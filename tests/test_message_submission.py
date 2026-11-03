@@ -77,6 +77,34 @@ class MessageSubmissionTests(unittest.TestCase):
             self.assertEqual(self.send()['mode'], 'started')
         self.queue.assert_not_called()
 
+    def test_bounded_idle_long_conversation_can_start_after_owner_and_state_reread(self):
+        self.state.update({'snapshot_complete': False, 'bounded_idle_safe': True})
+        self.backend.snapshot = Mock(return_value=copy.deepcopy(self.state))
+        result = self.send()
+        self.assertEqual(result['state'], 'confirmed')
+        self.assertEqual(result['mode'], 'started')
+        self.assertEqual(self.backend.snapshot.call_count, 2)
+        self.assertEqual(len(self.starts()), 1)
+        self.queue.assert_not_called()
+
+    def test_incomplete_non_idle_snapshot_never_starts_a_message(self):
+        self.state.update({'snapshot_complete': False, 'runtime': {'type': 'idle'}})
+        result = self.send()
+        self.assertEqual(result['state'], 'rejected')
+        self.assertIn('状态过大', result['reply'])
+        self.assertEqual(self.starts(), [])
+        self.queue.assert_not_called()
+
+    def test_bounded_state_that_changes_before_start_fails_closed(self):
+        idle = {**self.state, 'snapshot_complete': False, 'bounded_idle_safe': True}
+        unknown = {**idle, 'bounded_idle_safe': False, 'runtime': {'type': 'notLoaded'}}
+        self.backend.snapshot = Mock(side_effect=[idle, unknown])
+        result = self.send()
+        self.assertEqual(result['state'], 'rejected')
+        self.assertIn('提交前', result['reply'])
+        self.assertEqual(self.starts(), [])
+        self.queue.assert_not_called()
+
     def test_start_input_ui_restore_and_settings_inheritance(self):
         self.send()
         native = self.starts()[0]

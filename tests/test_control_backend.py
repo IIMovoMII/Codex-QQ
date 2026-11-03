@@ -155,7 +155,8 @@ class BackendTests(unittest.TestCase):
         class BoundedTools:
             def call(self, *_args, **_kwargs):
                 return {'state': 'confirmed', 'data': {
-                    'thread': {'id': THREAD, 'hostId': 'local', 'kind': 'codex', 'cwd': 'D:/work'},
+                    'thread': {'id': THREAD, 'hostId': 'local', 'kind': 'codex', 'cwd': 'D:/work',
+                               'status': {'type': 'active', 'activeFlags': []}},
                     'turns': [{'id': TURN, 'status': 'inProgress'}],
                 }}
 
@@ -169,6 +170,39 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(view['runtime'], {'type': 'active'})
         self.assertEqual(view['turn']['status'], 'inProgress')
         self.assertEqual(view['owner_id'], 'desktop-owner')
+        self.assertFalse(view['bounded_idle_safe'])
+
+    def test_bounded_snapshot_allows_idle_start_only_with_matching_native_status(self):
+        class BoundedTools:
+            def call(self, *_args, **_kwargs):
+                return {'state': 'confirmed', 'data': {
+                    'thread': {'id': THREAD, 'hostId': 'local', 'kind': 'codex', 'cwd': 'D:/work',
+                               'status': {'type': 'idle'}},
+                    'turns': [{'id': TURN, 'status': 'completed'}],
+                }}
+
+        backend = NativeBackend(pipe_factory=lambda: FakePipe(), app_tools=BoundedTools())
+        with patch.object(backend, 'probe', return_value=('same', 1.0)), \
+                patch.object(backend, 'read_settings', return_value={'model': 'gpt-test', 'effort': 'max',
+                                                                       'raw': {'resumeState': 'resumed', 'mode': 'default'}}):
+            view = backend._bounded_snapshot(THREAD, expected_connection='same')
+        self.assertFalse(view['snapshot_complete'])
+        self.assertTrue(view['bounded_idle_safe'])
+        self.assertEqual(view['runtime'], {'type': 'idle'})
+
+    def test_bounded_snapshot_rejects_conflicting_thread_and_turn_status(self):
+        class BoundedTools:
+            def call(self, *_args, **_kwargs):
+                return {'state': 'confirmed', 'data': {
+                    'thread': {'id': THREAD, 'hostId': 'local', 'kind': 'codex', 'cwd': 'D:/work',
+                               'status': {'type': 'idle'}},
+                    'turns': [{'id': TURN, 'status': 'inProgress'}],
+                }}
+
+        backend = NativeBackend(pipe_factory=lambda: FakePipe(), app_tools=BoundedTools())
+        with patch.object(backend, 'probe', return_value=('same', 1.0)), \
+                self.assertRaises(DesktopControlError):
+            backend._bounded_snapshot(THREAD, expected_connection='same')
 
 
 if __name__ == '__main__':
