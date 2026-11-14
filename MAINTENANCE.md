@@ -19,7 +19,7 @@ Python 模块默认位于 `src/codex_desktop_weixin/`。
 | 托盘、自启、生命周期 | `resident_app.py`、`win_tray.py`、`installer.py` |
 | 监听、状态、投递 | `monitor.py`、`tailer.py`、`state_machine.py`、`notifier.py`、`delivery_ledger.py` |
 | 引用、原生控制与文案 | `control_router.py`、`qq_desktop_bridge.py`、`control_backend.py`、`native_app_tools.py`；[动作参考](docs/reply-action-reference.md) |
-| 桌面应用与接管（开发中） | `desktop-app/`、`desktop_bridge.py`、`desktop_migration.py`；本机进度查 `PROJECT_STATUS.md` |
+| 桌面应用与接管 | `desktop-app/`、`desktop_bridge.py`、`desktop_migration.py`；本机状态查 `PROJECT_STATUS.md` |
 | 网关、构建与发布 | `vendor/cc-connect/`、`tools/`、`.github/workflows/`；[开发说明](docs/development.md) |
 | 用户操作与故障 | [使用说明](docs/usage.md)、[常见问题](docs/troubleshooting.md) |
 
