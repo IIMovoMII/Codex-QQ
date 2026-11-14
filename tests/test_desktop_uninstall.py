@@ -23,7 +23,9 @@ class DesktopUninstallTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        # Startup registration receives a canonical executable from the host.
+        # Resolve TEMP's possible 8.3 alias before building that fixture.
+        self.root = Path(self.temp.name).resolve()
         self.target = self.root / '安装 空间'
         self.target.mkdir()
         self.exe = self.target / 'codex-qq-desktop.exe'

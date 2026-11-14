@@ -17,7 +17,9 @@ from desktop_migration import MigrationError, legacy_launcher_path, migrate_path
 class DesktopMigrationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
+        # Windows CI may expose TEMP through an 8.3 alias; match the canonical
+        # paths that the migration service intentionally publishes.
+        self.root = Path(self.temp.name).resolve()
         self.old_root = self.root / "old-project"
         self.backend = self.root / "installed" / "_up_" / "backend"
         self.python = self.root / "installed" / "_up_" / "python" / "python.exe"
