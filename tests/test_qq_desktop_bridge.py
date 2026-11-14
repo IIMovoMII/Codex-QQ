@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 PACKAGE_DIR = Path(__file__).resolve().parents[1] / "src" / "codex_desktop_weixin"
@@ -29,6 +30,43 @@ THREAD = "00000000-0000-7000-8000-000000000002"
 
 
 class QQDesktopBridgeTests(unittest.TestCase):
+    def test_windows_queue_uses_current_desktop_bundle_not_explorer_npm_shim(self):
+        from qq_desktop_bridge import _codex_command
+        with tempfile.TemporaryDirectory() as temporary:
+            bundle = Path(temporary).resolve() / 'resources' / 'app.asar'
+            bundle.parent.mkdir()
+            bundle.write_bytes(b'bundle')
+            executable = bundle.with_name('codex.exe')
+            executable.write_bytes(b'current-bundled-cli')
+            with patch('qq_desktop_bridge.os', SimpleNamespace(name='nt', environ={})), \
+                 patch('control_backend.NativeBackend') as backend_type, \
+                 patch('control_contract._bundle_path', return_value=bundle) as verified_bundle, \
+                 patch('qq_desktop_bridge.shutil.which', return_value='old-npm/codex.cmd') as old_path:
+                backend_type.return_value.process_image = 'current-verified-desktop'
+                self.assertEqual(_codex_command(), [str(executable)])
+                backend_type.return_value.probe.assert_called_once_with()
+                verified_bundle.assert_called_once_with('current-verified-desktop')
+                old_path.assert_not_called()
+
+    def test_missing_desktop_queue_program_never_falls_back_to_unrelated_cli(self):
+        from desktop_control import DesktopControlError
+        from qq_desktop_bridge import _codex_command
+        with patch('qq_desktop_bridge.os', SimpleNamespace(name='nt', environ={})), \
+             patch('control_backend.NativeBackend') as backend_type, \
+             patch('qq_desktop_bridge.shutil.which') as old_path:
+            backend_type.return_value.probe.side_effect = DesktopControlError('no-owner')
+            self.assertIsNone(_codex_command())
+            old_path.assert_not_called()
+
+    def test_explicit_queue_override_is_strict_and_not_silently_replaced(self):
+        from qq_desktop_bridge import _codex_command
+        with patch('qq_desktop_bridge.os', SimpleNamespace(
+                name='nt', environ={'CODEX_QUEUE_BIN': 'configured-cli'})), \
+             patch('qq_desktop_bridge.shutil.which', return_value='configured-path'), \
+             patch('qq_desktop_bridge._desktop_codex_command') as native:
+            self.assertEqual(_codex_command(), ['configured-path'])
+            native.assert_not_called()
+
     def test_thread_id_validation_rejects_arguments(self) -> None:
         self.assertTrue(valid_thread_id(THREAD))
         self.assertFalse(valid_thread_id("../../secret"))
@@ -198,6 +236,19 @@ class QQDesktopBridgeTests(unittest.TestCase):
 
 
 class BridgeProcessEncodingTests(unittest.TestCase):
+    def test_direct_acp_entry_works_in_isolated_python_from_an_unrelated_directory(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            result = subprocess.run(
+                [sys.executable, '-I', '-B', '-X', 'utf8', str(PACKAGE_DIR/'qq_desktop_bridge.py')],
+                input=b'{"jsonrpc":"2.0","id":"entry-probe","method":"initialize","params":{}}\n',
+                cwd=temporary, env={**os.environ, 'CC_DATA_DIR': str(Path(temporary)/'qq')},
+                capture_output=True, timeout=10,
+                creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+            self.assertEqual(result.returncode, 0, result.stderr.decode('utf-8', errors='replace'))
+            reply = json.loads(result.stdout)
+            self.assertEqual(reply['id'], 'entry-probe')
+            self.assertEqual(reply['result']['agentInfo']['name'], 'codex-desktop-qq-bridge')
+
     def run_bridge(self, prompts: list[str], *, expected_message: str | None = None) -> list[dict]:
         """用真实冷启动管道验收编码，不依赖测试进程的 UTF-8 设置。"""
         bridge = PACKAGE_DIR / "qq_desktop_bridge.py"

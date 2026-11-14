@@ -4,8 +4,8 @@
 只负责这些本地控制：
 
 * 现行 ControlRouter 要求逐条引用，空闲/暂停时走原生开始新一轮；
-  运行中普通正文在没有可核实原子追加/CAS 时明确拒绝，不写入整份
-  Desktop 队列，也不改走独立 ``codex queue`` 队列；
+  运行中使用当前 Desktop 配套 CLI 追加原生队列，核对唯一回执，
+  不替换整份 Desktop 队列，也不在未知后重发；
 * 从 QQ 的“引用提醒”中提取完整线程编号，再把用户的回复排入对应
   Codex Desktop 对话；不从旧选择猜测本条目标。
 * 把明确的“暂停”指令交给拥有该对话的 Desktop 窗口，执行原生停止。
@@ -26,6 +26,10 @@ import threading
 import uuid
 from pathlib import Path
 from typing import Any, Callable
+
+PACKAGE_DIR = Path(__file__).resolve().parent
+if str(PACKAGE_DIR) not in sys.path:
+    sys.path.insert(0, str(PACKAGE_DIR))
 
 from desktop_control import pause_desktop
 
@@ -205,13 +209,37 @@ def parse_control_message(
     return "queue", current_thread, text
 
 
+def _desktop_codex_command() -> list[str] | None:
+    """Use the CLI shipped with the actual IPC owner, independent of PATH.
+
+    Explorer may inherit an older npm shim even though the open Desktop uses
+    a newer queue contract. Resolve only within its verified bundle; never
+    install, update, or run a different CLI after a submission has begun.
+    """
+    from control_backend import NativeBackend
+    from control_contract import _bundle_path
+    from desktop_control import DesktopControlError
+
+    try:
+        backend = NativeBackend()
+        backend.probe()
+        bundle = _bundle_path(backend.process_image or '')
+        executable = (bundle.parent / 'codex.exe').resolve(strict=True)
+        if executable.parent == bundle.parent and executable.is_file():
+            return [str(executable)]
+    except (DesktopControlError, OSError, ValueError, TimeoutError):
+        pass
+    return None
+
+
 def _codex_command() -> list[str] | None:
     configured = os.environ.get("CODEX_QUEUE_BIN", "").strip()
-    candidates = [configured] if configured else []
-    candidates.extend(["codex.exe", "codex.cmd", "codex"])
-    for candidate in candidates:
-        if not candidate:
-            continue
+    if configured:
+        resolved = shutil.which(configured) or (configured if Path(configured).is_file() else '')
+        return [resolved] if resolved else None
+    if os.name == 'nt':
+        return _desktop_codex_command()
+    for candidate in ("codex.exe", "codex.cmd", "codex"):
         resolved = shutil.which(candidate) or (candidate if Path(candidate).exists() else "")
         if resolved:
             return [resolved]
@@ -229,7 +257,7 @@ def queue_to_desktop(thread_id: str, message: str, *, timeout_seconds: float = 2
         return False, "消息包含损坏的字符，未发送；请重新输入原文。"
     command = _codex_command()
     if command is None:
-        return False, "找不到 codex 可执行文件。"
+        return False, "找不到当前 Codex Desktop 配套的队列程序；未发送，请确认 Codex 正在运行。"
     command.extend(["queue", "--thread", thread_id, "--message", message])
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:

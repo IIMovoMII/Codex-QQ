@@ -132,6 +132,34 @@ def normalize_saved_queue(value: Any) -> list[dict]:
         text = row.get('text')
         if not isinstance(text, str):
             raise ValueError('unsupported-queue-text')
-        result.append({'id': row['id'], 'summary': redact_error_text(text.replace('\n', ' '), limit=160),
-                       'status': status, 'digest': signature(row), 'paused': bool(row.get('pausedReason'))})
+        item = {'id': row['id'], 'summary': redact_error_text(text.replace('\n', ' '), limit=160),
+                'status': status, 'digest': signature(row), 'paused': bool(row.get('pausedReason'))}
+        if '_server_queue' in row:
+            from submission_receipts import ID, digest
+            server = row['_server_queue']
+            if (not isinstance(server, dict) or set(server) != {'client_id'}
+                    or not isinstance(server['client_id'], str) or not ID.fullmatch(server['client_id'])):
+                raise ValueError('unsupported-server-queue-identity')
+            item.update(server_client_id=server['client_id'], text_digest=digest(text))
+        result.append(item)
     return result
+
+
+def queue_removal_matches(removed: Any, entry: dict) -> bool:
+    """A server projection differs from a saved UI row: verify both native identities."""
+    message = removed.get('message') if isinstance(removed, dict) else None
+    if not isinstance(message, dict) or message.get('id') != entry['id']:
+        return False
+    if 'server_client_id' not in entry:
+        return signature(message) == entry['digest']
+    from submission_receipts import digest, text_payload
+    server = removed.get('serverSubmission')
+    if not isinstance(server, dict) or server.get('id') != entry['id']:
+        return False
+    try:
+        payload = text_payload(server, entry['id'])
+        return (payload is not None and payload['client_id'] == entry['server_client_id']
+                and message.get('text') == payload['text']
+                and digest(payload['text']) == entry['text_digest'])
+    except (ValueError, UnicodeError):
+        return False

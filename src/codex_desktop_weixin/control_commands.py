@@ -140,9 +140,9 @@ class ActionCommands:
             self.r.backend.ensure_owner(thread_id)
             entries = self.r.catalog.saved_queue(thread_id)
             if not entries:
-                return 'Desktop 已保存的本地排队记录为空。服务端队列尚不能完整查询，不能据此认定所有队列都为空。', 'confirmed'
+                return '本机可见的排队记录为空。无法完整查询远端服务端队列，不能据此认定所有队列都为空。', 'confirmed'
             return self._list('queue_list', thread_id, entries,
-                              '本地已保存的排队记录（可能不含服务端队列；状态以原生处理为准）'), 'confirmed'
+                              '本机可见的排队记录（含本机服务端队列；远端完整性未知，状态以原生处理为准）'), 'confirmed'
         if command in ('待办', '问题', '审批'):
             state = self._backend_call('control_state', thread_id, connection=self.connection)
             incomplete = state.get('snapshot_complete') is False or not state.get('requests_known')

@@ -359,7 +359,10 @@ class NativeBackend:
             'compactions': compactions, 'pending': bool(state.get('unconfirmedTurnSubmissions')),
             'cwd': state.get('cwd'),
             'collaboration_mode': state.get('latestCollaborationMode'),
-            'goal_known': 'threadGoal' in state,
+            # In a complete v11 owner snapshot threadGoal is optional: JSON
+            # omits undefined, and Desktop's goalState reader normalizes it
+            # with ?? null. The bounded read_thread fallback remains unknown.
+            'goal_known': True,
             'goal': state.get('threadGoal'),
             'permissions_known': permissions_known,
             'workspace_roots': context.get('workspaceRoots'),
@@ -839,9 +842,8 @@ class NativeBackend:
         removed = result['result'].get('removed')
         if removed is None:
             return {'state': 'rejected', 'reply': '原生队列中已没有这条消息，没有删除其他条目；它可能已经开始。'}
-        from control_actions import signature
-        message = removed.get('message') if isinstance(removed, dict) else None
-        if not isinstance(message, dict) or message.get('id') != entry['id'] or signature(message) != entry['digest']:
+        from control_actions import queue_removal_matches
+        if not queue_removal_matches(removed, entry):
             return {'state': 'unknown', 'reply': 'Desktop 返回了 remove 结果，但队列 ID 或记录摘要与所选条目不一致；无法确认是否在发送前删除。不会重试，请检查电脑队列。'}
         return {'state': 'confirmed', 'reply': '已移除这一条待发送消息，未清空其他消息。已经开始的模型任务不能靠删除队列撤回。'}
 
@@ -858,7 +860,7 @@ class NativeBackend:
             self.require_extended_contract()
         except Exception as error:
             return {'state': 'rejected', 'retryable': True, 'reply': f'未删除、未引导：当前 Desktop 没有通过队列/steer 接口检查（{type(error).__name__}）。本次未调用原生操作；更新或恢复连接后重新查看队列。'}
-        from control_actions import normalize_saved_queue, signature
+        from control_actions import normalize_saved_queue, queue_removal_matches
 
         try:
             rows = catalog.saved_queue_rows(thread_id)
@@ -900,8 +902,8 @@ class NativeBackend:
             return {'state': state, 'reply': f'Desktop 未确认删除该队列编号（状态={state}）；没有继续调用 steer。该项可能仍在队列或已被消费，先检查电脑队列再决定。'}
         removed = (removed_result.get('result') or {}).get('removed')
         message = removed.get('message') if isinstance(removed, dict) else None
-        if (not isinstance(message, dict) or message.get('id') != entry['id']
-                or message.get('text') != text or signature(message) != entry['digest']):
+        if (not isinstance(message, dict) or message.get('text') != text
+                or not queue_removal_matches(removed, entry)):
             return {'state': 'unknown', 'reply': 'Desktop 已受理 remove，但回执中的队列编号或正文摘要与所选条目不一致；没有继续调用 steer。请检查队列，避免丢失或重复发送正文。'}
 
         try:

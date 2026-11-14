@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import copy
 import shlex
 import shutil
 import sys
@@ -283,6 +284,81 @@ def install_hooks(codex_home: Path, cli_path: Path, *, data_dir: Path | None = N
         raise
 
     return {"hooks_path": str(hooks_path), "config_path": str(config_path), "backup_dir": str(backup_dir), "command": command}
+
+
+def managed_hooks_need_path_update(codex_home: Path, cli_path: Path) -> bool:
+    hooks_path = codex_home.resolve() / "hooks.json"
+    if not hooks_path.is_file():
+        return False
+    document = json.loads(hooks_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(document, dict):
+        raise ValueError("hooks.json 的根节点不是对象。")
+    desired = build_hook_command(cli_path)
+    hooks = document.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    for groups in hooks.values():
+        if not isinstance(groups, list):
+            continue
+        for group in groups:
+            handlers = group.get("hooks") if isinstance(group, dict) else None
+            if not isinstance(handlers, list):
+                continue
+            for handler in handlers:
+                if _is_managed_handler(handler) and any(
+                    handler.get(key) != desired
+                    for key in ("command", "commandWindows", "command_windows")
+                    if key in handler
+                ):
+                    return True
+    return False
+
+
+def update_managed_hook_paths(codex_home: Path, cli_path: Path, *, data_dir: Path | None = None) -> dict[str, Any]:
+    codex_home = codex_home.resolve()
+    hooks_path = codex_home / "hooks.json"
+    if not hooks_path.is_file():
+        return {"changed": False, "hooks_path": str(hooks_path), "backup_dir": ""}
+    original = json.loads(hooks_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(original, dict):
+        raise ValueError("hooks.json 的根节点不是对象。")
+    updated = copy.deepcopy(original)
+    desired = build_hook_command(cli_path)
+    hooks = updated.get("hooks")
+    changed = False
+    if isinstance(hooks, dict):
+        for groups in hooks.values():
+            if not isinstance(groups, list):
+                continue
+            for group in groups:
+                handlers = group.get("hooks") if isinstance(group, dict) else None
+                if not isinstance(handlers, list):
+                    continue
+                for handler in handlers:
+                    if not _is_managed_handler(handler):
+                        continue
+                    for key in ("command", "commandWindows", "command_windows"):
+                        if key in handler and handler[key] != desired:
+                            handler[key] = desired
+                            changed = True
+    if not changed:
+        return {"changed": False, "hooks_path": str(hooks_path), "backup_dir": ""}
+
+    paths = ensure_runtime_dirs(data_dir or default_data_dir())
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    backup_dir = paths["root"] / "install-backups" / f"desktop-app-hooks-{stamp}"
+    backup_dir.mkdir(parents=True, exist_ok=False)
+    manifest = {"created_at": datetime.now(timezone.utc).isoformat(),
+                "files": [_backup(hooks_path, backup_dir)]}
+    atomic_write_json(backup_dir / "manifest.json", manifest)
+    try:
+        atomic_write_json(hooks_path, updated)
+        if json.loads(hooks_path.read_text(encoding="utf-8")) != updated:
+            raise RuntimeError("写入后未能验证 hooks.json。")
+    except Exception:
+        shutil.copyfile(manifest["files"][0]["backup"], hooks_path)
+        raise
+    return {"changed": True, "hooks_path": str(hooks_path), "backup_dir": str(backup_dir)}
 
 
 def uninstall_hooks(codex_home: Path) -> dict[str, Any]:

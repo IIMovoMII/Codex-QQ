@@ -106,6 +106,25 @@ class ReceiptTests(QueueBase, unittest.TestCase):
         self.queue.add(payload=payload)
         self.assertFalse(read_queued_item(self.path, THREAD_A, QUEUE)['payload_verified'])
 
+    def test_current_cli_user_input_enum_keeps_identity_and_exact_digest(self):
+        payload = {'UserInput': {'content': [{'type': 'text', 'text': TEXT, 'text_elements': []}],
+                                 'client_id': CLIENT}}
+        self.queue.add(payload=payload)
+        item = read_queued_item(self.path, THREAD_A, QUEUE, text_digest=digest(TEXT))
+        self.assertTrue(item['payload_verified'])
+        self.assertEqual(item['client_id'], CLIENT)
+        self.assertNotIn(TEXT, str(item))
+        with self.assertRaises(ValueError):
+            read_queued_item(self.path, THREAD_A, QUEUE, text_digest=digest('different'))
+        for invalid in ({**payload, 'input': []},
+                        {'UserInput': {**payload['UserInput'], 'future': True}},
+                        {'UserInput': {**payload['UserInput'], 'content': [{'type': 'image', 'url': 'x'}]}}):
+            with self.subTest(payload=invalid):
+                self.queue.add(payload=invalid)
+                observed = observed_status(receipt(), self.path, lambda _: {'accepted_submissions': []})
+                self.assertFalse(observed['payload_verified'])
+                self.assertIsNone(observed['client_id'])
+
     def test_empty_missing_corrupt_or_future_schema_is_not_started(self):
         self.queue.consume()
         snapshot = lambda _, expected_connection=None: {'turn': {'status': 'inProgress'}, 'accepted_submissions': []}

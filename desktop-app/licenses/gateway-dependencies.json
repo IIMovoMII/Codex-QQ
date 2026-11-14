@@ -1,0 +1,290 @@
+[
+  {
+    "name": "github.com/BurntSushi/toml",
+    "version": "v1.6.0",
+    "source": "https://proxy.golang.org/github.com/!burnt!sushi/toml/@v/v1.6.0.zip",
+    "moduleChecksum": "h1:dRaEfpa2VI55EwlIW72hMRHdWouJeRF7TPYhI+AUQjk=",
+    "file": "desktop-app/licenses/gateway/2c8e80ea9802b580.txt",
+    "sha256": "1c3f85d318985ca35d571da3c8356cf5854240d511d58faf5d65d5955c2bf5d5"
+  },
+  {
+    "name": "github.com/aymanbagabas/go-osc52/v2",
+    "version": "v2.0.1",
+    "source": "https://proxy.golang.org/github.com/aymanbagabas/go-osc52/v2/@v/v2.0.1.zip",
+    "moduleChecksum": "h1:HwpRHbFMcZLEVr42D4p7XBqjyuxQH5SMiErDT4WkJ2k=",
+    "file": "desktop-app/licenses/gateway/19b89158afbd20c6.txt",
+    "sha256": "3672ba918ea0c9e73f408d14bfd470a1046db034256f778fb303d6249022b5aa"
+  },
+  {
+    "name": "github.com/charmbracelet/bubbles",
+    "version": "v1.0.0",
+    "source": "https://proxy.golang.org/github.com/charmbracelet/bubbles/@v/v1.0.0.zip",
+    "moduleChecksum": "h1:12J8/ak/uCZEMQ6KU7pcfwceyjLlWsDLAxB5fXonfvc=",
+    "file": "desktop-app/licenses/gateway/e1bc514eee8d2503.txt",
+    "sha256": "0f6e5c0376f76f18c5f14787028fa65ccdc3e7d78a4c6c500dd85a561c7dee54"
+  },
+  {
+    "name": "github.com/charmbracelet/bubbletea",
+    "version": "v1.3.10",
+    "source": "https://proxy.golang.org/github.com/charmbracelet/bubbletea/@v/v1.3.10.zip",
+    "moduleChecksum": "h1:otUDHWMMzQSB0Pkc87rm691KZ3SWa4KUlvF9nRvCICw=",
+    "file": "desktop-app/licenses/gateway/485c7e438f58fa81.txt",
+    "sha256": "198f1439b5cbc0dc449659fa2bd6f81d792e320e932dfe192fdf0e0f39e1a5e1"
+  },
+  {
+    "name": "github.com/charmbracelet/colorprofile",
+    "version": "v0.4.1",
+    "source": "https://proxy.golang.org/github.com/charmbracelet/colorprofile/@v/v0.4.1.zip",
+    "moduleChecksum": "h1:a1lO03qTrSIRaK8c3JRxJDZOvhvIeSco3ej+ngLk1kk=",
+    "file": "desktop-app/licenses/gateway/bbd41c1d59c07c14.txt",
+    "sha256": "78b1d5816be14588e08583762c4a3a1824b1297be66199eda8bafd150ba533d3"
+  },
+  {
+    "name": "github.com/charmbracelet/lipgloss",
+    "version": "v1.1.0",
+    "source": "https://proxy.golang.org/github.com/charmbracelet/lipgloss/@v/v1.1.0.zip",
+    "moduleChecksum": "h1:vYXsiLHVkK7fp74RkV7b2kq9+zDLoEU4MZoFqR/noCY=",
+    "file": "desktop-app/licenses/gateway/caad1458a891986d.txt",
+    "sha256": "f0dbae40e9b03aae350ec1cd2d14f6f25c4cfe455c4d0f8a525225a9596a3967"
+  },
+  {
+    "name": "github.com/charmbracelet/x/ansi",
+    "version": "v0.11.6",
+    "source": "https://proxy.golang.org/github.com/charmbracelet/x/ansi/@v/v0.11.6.zip",
+    "moduleChecksum": "h1:GhV21SiDz/45W9AnV2R61xZMRri5NlLnl6CVF7ihZW8=",
+    "file": "desktop-app/licenses/gateway/c1c2cc6e447080a2.txt",
+    "sha256": "c0f43631bc68799aff4ec1d799cb39cf1ef80949de41642d447df5924ebf65ed"
+  },
+  {
+    "name": "github.com/charmbracelet/x/cellbuf",
+    "version": "v0.0.15",
+    "source": "https://proxy.golang.org/github.com/charmbracelet/x/cellbuf/@v/v0.0.15.zip",
+    "moduleChecksum": "h1:ur3pZy0o6z/R7EylET877CBxaiE1Sp1GMxoFPAIztPI=",
+    "file": "desktop-app/licenses/gateway/1a7546b15789ec6c.txt",
+    "sha256": "0041c8d783201319efbaf7bef576b1a0cf08a1e324e384fe28fd9c6361b8220a"
+  },
+  {
+    "name": "github.com/charmbracelet/x/term",
+    "version": "v0.2.2",
+    "source": "https://proxy.golang.org/github.com/charmbracelet/x/term/@v/v0.2.2.zip",
+    "moduleChecksum": "h1:xVRT/S2ZcKdhhOuSP4t5cLi5o+JxklsoEObBSgfgZRk=",
+    "file": "desktop-app/licenses/gateway/55e9dd059a4bc2ec.txt",
+    "sha256": "4f90d72cdbd81124725d3813c25f861a6ad5613c10f0ffbab3ec3da2ee6bd6d3"
+  },
+  {
+    "name": "github.com/clipperhouse/displaywidth",
+    "version": "v0.9.0",
+    "source": "https://proxy.golang.org/github.com/clipperhouse/displaywidth/@v/v0.9.0.zip",
+    "moduleChecksum": "h1:Qb4KOhYwRiN3viMv1v/3cTBlz3AcAZX3+y9OLhMtAtA=",
+    "file": "desktop-app/licenses/gateway/f7518b2540abcc05.txt",
+    "sha256": "c13f8fdca538e97274025f78f58978c422676709e15a57f12c91341f58a47c80"
+  },
+  {
+    "name": "github.com/clipperhouse/stringish",
+    "version": "v0.1.1",
+    "source": "https://proxy.golang.org/github.com/clipperhouse/stringish/@v/v0.1.1.zip",
+    "moduleChecksum": "h1:+NSqMOr3GR6k1FdRhhnXrLfztGzuG+VuFDfatpWHKCs=",
+    "file": "desktop-app/licenses/gateway/f7b2a2abbbd94787.txt",
+    "sha256": "7ca939ffdf84f92e662c817f0514038a06023e1b1a261758d2f6f80742578f60"
+  },
+  {
+    "name": "github.com/clipperhouse/uax29/v2",
+    "version": "v2.5.0",
+    "source": "https://proxy.golang.org/github.com/clipperhouse/uax29/v2/@v/v2.5.0.zip",
+    "moduleChecksum": "h1:x7T0T4eTHDONxFJsL94uKNKPHrclyFI0lm7+w94cO8U=",
+    "file": "desktop-app/licenses/gateway/62b2c3704f64e7c7.txt",
+    "sha256": "d1f4ccb81a42e68c36500fd6b419c37c902ffe459a7a113929f5fc10dfac1d82"
+  },
+  {
+    "name": "github.com/dustin/go-humanize",
+    "version": "v1.0.1",
+    "source": "https://proxy.golang.org/github.com/dustin/go-humanize/@v/v1.0.1.zip",
+    "moduleChecksum": "h1:GzkhY7T5VNhEkwH0PVJgjz+fX1rhBrR7pRT3mDkpeCY=",
+    "file": "desktop-app/licenses/gateway/10387c8852023b63.txt",
+    "sha256": "338ae0fea0ecfd87ceb66b915801b95d1d0483277ec7501c78557b86071b9478"
+  },
+  {
+    "name": "github.com/erikgeiser/coninput",
+    "version": "v0.0.0-20211004153227-1c3628e74d0f",
+    "source": "https://proxy.golang.org/github.com/erikgeiser/coninput/@v/v0.0.0-20211004153227-1c3628e74d0f.zip",
+    "moduleChecksum": "h1:Y/CXytFA4m6baUTXGLOoWe4PQhGxaX0KpnayAqC48p4=",
+    "file": "desktop-app/licenses/gateway/bc7b3efa30c2bd84.txt",
+    "sha256": "cbf7d29d22ad6f9c6abf15a07b11f20d4fefb6a6e985db318408881823b3b82a"
+  },
+  {
+    "name": "github.com/gorilla/websocket",
+    "version": "v1.5.0",
+    "source": "https://proxy.golang.org/github.com/gorilla/websocket/@v/v1.5.0.zip",
+    "moduleChecksum": "h1:PPwGk2jz7EePpoHN/+ClbZu8SPxiqlu12wZP/3sWmnc=",
+    "file": "desktop-app/licenses/gateway/a3bf8a003f9be413.txt",
+    "sha256": "29eb7800cccc34dbc3abae60ab5eadce5f6d86dfeafcd3152460e0868780582e"
+  },
+  {
+    "name": "github.com/lucasb-eyer/go-colorful",
+    "version": "v1.3.0",
+    "source": "https://proxy.golang.org/github.com/lucasb-eyer/go-colorful/@v/v1.3.0.zip",
+    "moduleChecksum": "h1:2/yBRLdWBZKrf7gB40FoiKfAWYQ0lqNcbuQwVHXptag=",
+    "file": "desktop-app/licenses/gateway/08e344d75338b258.txt",
+    "sha256": "f0c6f4c1cc951750756dcbc639d6a8aecbd599f8c4cce127efcfe269c97955e6"
+  },
+  {
+    "name": "github.com/mattn/go-isatty",
+    "version": "v0.0.20",
+    "source": "https://proxy.golang.org/github.com/mattn/go-isatty/@v/v0.0.20.zip",
+    "moduleChecksum": "h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=",
+    "file": "desktop-app/licenses/gateway/b24aeb3102146d70.txt",
+    "sha256": "f5e55d0bb20ea7b0cd445ccd59170cd47e738205ce829af7aeae275952766b2b"
+  },
+  {
+    "name": "github.com/mattn/go-localereader",
+    "version": "v0.0.1",
+    "source": "https://proxy.golang.org/github.com/mattn/go-localereader/@v/v0.0.1.zip",
+    "moduleChecksum": "h1:ygSAOl7ZXTx4RdPYinUpg6W99U8jWvWi9Ye2JC/oIi4=",
+    "file": "desktop-app/licenses/gateway/27f470c8c9116881.txt",
+    "sha256": "506302c027565d7e75babf1d26c03562cfb928181e166a6fa4ff2c0dce8442cf"
+  },
+  {
+    "name": "github.com/mattn/go-runewidth",
+    "version": "v0.0.19",
+    "source": "https://proxy.golang.org/github.com/mattn/go-runewidth/@v/v0.0.19.zip",
+    "moduleChecksum": "h1:v++JhqYnZuu5jSKrk9RbgF5v4CGUjqRfBm05byFGLdw=",
+    "file": "desktop-app/licenses/gateway/a28cfadecd670410.txt",
+    "sha256": "e42dbd9530e0a9a26194f5837aff96e4ac5890a67f2835cdd5c1a055fc7ba5a9"
+  },
+  {
+    "name": "github.com/mdp/qrterminal/v3",
+    "version": "v3.2.1",
+    "source": "https://proxy.golang.org/github.com/mdp/qrterminal/v3/@v/v3.2.1.zip",
+    "moduleChecksum": "h1:6+yQjiiOsSuXT5n9/m60E54vdgFsw0zhADHhHLrFet4=",
+    "file": "desktop-app/licenses/gateway/1ebb5294d5ce9b8a.txt",
+    "sha256": "1d7073d8eceae6507ca10320ea97991ea460cc4ea069192405d08d90fa10b3e6"
+  },
+  {
+    "name": "github.com/muesli/ansi",
+    "version": "v0.0.0-20230316100256-276c6243b2f6",
+    "source": "https://proxy.golang.org/github.com/muesli/ansi/@v/v0.0.0-20230316100256-276c6243b2f6.zip",
+    "moduleChecksum": "h1:ZK8zHtRHOkbHy6Mmr5D264iyp3TiX5OmNcI5cIARiQI=",
+    "file": "desktop-app/licenses/gateway/341a939a81fced14.txt",
+    "sha256": "b374cd3275559be0b8473ad4e0525dc8e6ba15c2efb4606f068cd07367cf53d2"
+  },
+  {
+    "name": "github.com/muesli/cancelreader",
+    "version": "v0.2.2",
+    "source": "https://proxy.golang.org/github.com/muesli/cancelreader/@v/v0.2.2.zip",
+    "moduleChecksum": "h1:3I4Kt4BQjOR54NavqnDogx/MIoWBFa0StPA8ELUXHmA=",
+    "file": "desktop-app/licenses/gateway/c052f69517dbb13a.txt",
+    "sha256": "3beeeb3e30a92b7ff94751ef6f9efb841df7e4a9d58c0f86cb2fa6f0a0971df6"
+  },
+  {
+    "name": "github.com/muesli/termenv",
+    "version": "v0.16.0",
+    "source": "https://proxy.golang.org/github.com/muesli/termenv/@v/v0.16.0.zip",
+    "moduleChecksum": "h1:S5AlUN9dENB57rsbnkPyfdGuWIlkmzJjbFf0Tf5FWUc=",
+    "file": "desktop-app/licenses/gateway/13304e30acd0f898.txt",
+    "sha256": "ff5b3c9b4bbe78d7bdaefa5cda5b201bca6363df93e310ddf196657b900afcfd"
+  },
+  {
+    "name": "github.com/ncruces/go-strftime",
+    "version": "v1.0.0",
+    "source": "https://proxy.golang.org/github.com/ncruces/go-strftime/@v/v1.0.0.zip",
+    "moduleChecksum": "h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOFAw7w=",
+    "file": "desktop-app/licenses/gateway/90de0de07ef5aee9.txt",
+    "sha256": "a7b37eb0678eafb8718a6179c790a0ca87e09d0a5de9637ad039f34860bb506a"
+  },
+  {
+    "name": "github.com/remyoudompheng/bigfft",
+    "version": "v0.0.0-20230129092748-24d4a6f8daec",
+    "source": "https://proxy.golang.org/github.com/remyoudompheng/bigfft/@v/v0.0.0-20230129092748-24d4a6f8daec.zip",
+    "moduleChecksum": "h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=",
+    "file": "desktop-app/licenses/gateway/ccde9cb2b3b92254.txt",
+    "sha256": "07426a0e63d0b76191d06e7b71415e88ab2094ea9b8259376043f6e86a319cae"
+  },
+  {
+    "name": "github.com/rivo/uniseg",
+    "version": "v0.4.7",
+    "source": "https://proxy.golang.org/github.com/rivo/uniseg/@v/v0.4.7.zip",
+    "moduleChecksum": "h1:WUdvkW8uEhrYfLC4ZzdpI2ztxP1I582+49Oc5Mq64VQ=",
+    "file": "desktop-app/licenses/gateway/10a5b277238545ab.txt",
+    "sha256": "6ac6167e318d8a2a15fe34a186d4aaac92bf59a62fc506b052a8ab1e59cac3bc"
+  },
+  {
+    "name": "github.com/robfig/cron/v3",
+    "version": "v3.0.1",
+    "source": "https://proxy.golang.org/github.com/robfig/cron/v3/@v/v3.0.1.zip",
+    "moduleChecksum": "h1:WdRxkvbJztn8LMz/QEvLN5sBU+xKpSqwwUO1Pjr4qDs=",
+    "file": "desktop-app/licenses/gateway/0a793cbc3aadb5ea.txt",
+    "sha256": "e09aeb62c3b3341f56bca2a5264254a75bff6c28caa0f0d6bd576d2a625f05c0"
+  },
+  {
+    "name": "github.com/xo/terminfo",
+    "version": "v0.0.0-20220910002029-abceb7e1c41e",
+    "source": "https://proxy.golang.org/github.com/xo/terminfo/@v/v0.0.0-20220910002029-abceb7e1c41e.zip",
+    "moduleChecksum": "h1:JVG44RsyaB9T2KIHavMF/ppJZNG9ZpyihvCd0w101no=",
+    "file": "desktop-app/licenses/gateway/cdfb83b8ef7c577f.txt",
+    "sha256": "945ec647bfdb8d90a38ef6abe662271322f972b20e788fe06403161e4c0413c3"
+  },
+  {
+    "name": "golang.org/x/sys",
+    "version": "v0.43.0",
+    "source": "https://proxy.golang.org/golang.org/x/sys/@v/v0.43.0.zip",
+    "moduleChecksum": "h1:Rlag2XtaFTxp19wS8MXlJwTvoh8ArU6ezoyFsMyCTNI=",
+    "file": "desktop-app/licenses/gateway/489d7175b53e21b9.txt",
+    "sha256": "333c8eb5b13743a899f7e24ea2b3e60c2e1f8a8adf8d0d91452ec4afeaca6e5c"
+  },
+  {
+    "name": "golang.org/x/term",
+    "version": "v0.42.0",
+    "source": "https://proxy.golang.org/golang.org/x/term/@v/v0.42.0.zip",
+    "moduleChecksum": "h1:UiKe+zDFmJobeJ5ggPwOshJIVt6/Ft0rcfrXZDLWAWY=",
+    "file": "desktop-app/licenses/gateway/8d64efecc4a345af.txt",
+    "sha256": "4c3c3740d3f59d085b687fbfa73e58ff22cb0f1604697b168cea08402089de21"
+  },
+  {
+    "name": "golang.org/x/text",
+    "version": "v0.36.0",
+    "source": "https://proxy.golang.org/golang.org/x/text/@v/v0.36.0.zip",
+    "moduleChecksum": "h1:JfKh3XmcRPqZPKevfXVpI1wXPTqbkE5f7JA92a55Yxg=",
+    "file": "desktop-app/licenses/gateway/42fe1d4370368d2f.txt",
+    "sha256": "cbc163ba437f709481adceb20a7e5e473049031e5d1e75e7fc5af55a3dc4f3f9"
+  },
+  {
+    "name": "modernc.org/libc",
+    "version": "v1.72.0",
+    "source": "https://proxy.golang.org/modernc.org/libc/@v/v1.72.0.zip",
+    "moduleChecksum": "h1:IEu559v9a0XWjw0DPoVKtXpO2qt5NVLAnFaBbjq+n8c=",
+    "file": "desktop-app/licenses/gateway/b51889a2b36167ff.txt",
+    "sha256": "f3a3c23745c4cceca0f0aac75746a3342b65bf9f6049b85134eb0687a0036602"
+  },
+  {
+    "name": "modernc.org/mathutil",
+    "version": "v1.7.1",
+    "source": "https://proxy.golang.org/modernc.org/mathutil/@v/v1.7.1.zip",
+    "moduleChecksum": "h1:GCZVGXdaN8gTqB1Mf/usp1Y/hSqgI2vAGGP4jZMCxOU=",
+    "file": "desktop-app/licenses/gateway/bc866d47782e62af.txt",
+    "sha256": "23a3e6b423e4cea5364a1e07819958bd91bd7ecc5f116647752ea9d8d4f2d5c9"
+  },
+  {
+    "name": "modernc.org/memory",
+    "version": "v1.11.0",
+    "source": "https://proxy.golang.org/modernc.org/memory/@v/v1.11.0.zip",
+    "moduleChecksum": "h1:o4QC8aMQzmcwCK3t3Ux/ZHmwFPzE6hf2Y5LbkRs+hbI=",
+    "file": "desktop-app/licenses/gateway/d7308111de337a63.txt",
+    "sha256": "f04b62279c9230c2450e5db9035c90972d7f4a525375f3294798ed544a4d6124"
+  },
+  {
+    "name": "modernc.org/sqlite",
+    "version": "v1.49.1",
+    "source": "https://proxy.golang.org/modernc.org/sqlite/@v/v1.49.1.zip",
+    "moduleChecksum": "h1:dYGHTKcX1sJ+EQDnUzvz4TJ5GbuvhNJa8Fg6ElGx73U=",
+    "file": "desktop-app/licenses/gateway/ee920592719a2897.txt",
+    "sha256": "1ca8ef02001b64920925a5bba184783c1ad76c860c8f983be4a3b8838a80ff29"
+  },
+  {
+    "name": "rsc.io/qr",
+    "version": "v0.2.0",
+    "source": "https://proxy.golang.org/rsc.io/qr/@v/v0.2.0.zip",
+    "moduleChecksum": "h1:6vBLea5/NRMVTz8V66gipeLycZMl/+UlFmk8DvqQ6WY=",
+    "file": "desktop-app/licenses/gateway/0f098cdd7dee49a8.txt",
+    "sha256": "8785c8ffd3fd2fcb899852f69cc8a4994031344a1e44b5dda566920f86983b7f"
+  }
+]

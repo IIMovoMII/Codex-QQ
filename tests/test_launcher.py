@@ -206,6 +206,24 @@ class CCConnectLifecycleTests(unittest.TestCase):
                 self.assertIsNone(launcher._socket_is_reachable(root / 'api.sock'))
                 self.assertEqual(cc_connect_api_status(root), 'missing')
 
+    @unittest.skipUnless(os.name == 'nt', 'Windows AF_UNIX address conversion')
+    def test_windows_probe_distinguishes_live_and_stale_unix_socket_without_constant(self):
+        import ctypes
+        import socket
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / 'api.sock'
+            address = ctypes.create_string_buffer(b'\x01\x00' + str(path).encode('utf-8') + b'\0', 110)
+            winsock = ctypes.WinDLL('ws2_32')
+            winsock.bind.argtypes = [ctypes.c_size_t, ctypes.c_void_p, ctypes.c_int]
+            winsock.bind.restype = ctypes.c_int
+            with socket.socket(1, socket.SOCK_STREAM) as server:
+                self.assertEqual(winsock.bind(server.fileno(), address, len(address)), 0)
+                server.listen(1)
+                with patch.object(launcher.socket, 'AF_UNIX', None, create=True):
+                    self.assertTrue(launcher._socket_is_reachable(path))
+            with patch.object(launcher.socket, 'AF_UNIX', None, create=True):
+                self.assertFalse(launcher._socket_is_reachable(path))
+
     def test_unavailable_probe_preserves_existing_socket(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

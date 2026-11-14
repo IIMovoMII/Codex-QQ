@@ -141,6 +141,23 @@ class ForkBackendTests(unittest.TestCase):
         self.tools.fork_latest.assert_called_once_with(THREAD, 'connection', 'op')
         self.assertFalse(self.tools.create.called)
 
+    def test_complete_owner_snapshot_with_omitted_optional_goal_can_fork(self):
+        # Current Desktop omits undefined threadGoal when serializing its full
+        # owner state. This is the actual QQ failure shape, not a bounded page.
+        self.state = {**NativeBackend._view({
+            'id': THREAD, 'latestModel': 'gpt-test', 'latestReasoningEffort': 'max',
+            'latestThreadSettings': {}, 'currentPermissions': {},
+            'requests': [], 'resumeState': 'resumed',
+            'threadRuntimeStatus': {'type': 'idle'},
+            'turns': [{'turnId': TURN, 'status': 'completed', 'items': []}],
+            'cwd': 'D:/中文 空格',
+        }), 'owner_id': 'desktop-owner', 'snapshot_complete': True}
+        self.baseline = self.backend.fork_boundary(THREAD, 'connection')
+        result = self.fork()
+        self.assertEqual(result['state'], 'confirmed')
+        self.tools.fork_latest.assert_called_once_with(THREAD, 'connection', 'op')
+        self.assertFalse(self.tools.create.called)
+
     def test_running_pending_goal_unknown_goal_or_requests_refuse_before_fork(self):
         for changes in ({'turn': {'turnId': TURN, 'status': 'inProgress'}}, {'pending': True},
                         {'goal': {'status': 'paused'}}, {'goal_known': False},

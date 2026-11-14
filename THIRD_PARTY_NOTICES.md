@@ -11,4 +11,8 @@
 
 ## 运行环境与产品名称
 
+桌面安装包包含固定版本 Python（许可全文在 `python/LICENSE.txt`）、WebView2 Loader、Tauri/Rust 和 Svelte/Lucide 依赖。构建从 Cargo.lock、package-lock.json 与原始许可证收集 `licenses/DEPENDENCIES.json`、`licenses/THIRD_PARTY_LICENSES.txt`，随包分发；构建工具也保守列入。缺少许可证时构建停止。WebView2 运行时由微软安装与维护，不附带 Chrome。
+
+MPL-2.0 组件保持原样，源码可从依赖清单中的精确 crates.io 版本链接获取；本项目对这些组件没有修改。缺失于 crate 的根许可证从对应源码提交保留在 [desktop-app/licenses](desktop-app/licenses)，其来源与哈希一并记录。微软 Loader 的许可来源和版本也在该目录保留。
+
 Python、Windows/.NET、QQ 和 Codex 各自属于其提供方。Codex-QQ 是独立社区项目，不隶属于 OpenAI 或腾讯，也不分发 Codex 客户端或任何账号凭据。

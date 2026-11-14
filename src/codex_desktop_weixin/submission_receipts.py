@@ -33,6 +33,68 @@ def digest(text: str) -> str:
     return hashlib.sha256(text.encode('utf-8', errors='strict')).hexdigest()
 
 
+def text_payload(payload: Any, queue_id: str) -> dict | None:
+    """Decode only the two inspected, single-text native queue representations."""
+    if not isinstance(payload, dict):
+        return None
+    if set(payload) == {'UserInput'}:
+        value = payload['UserInput']
+        if not isinstance(value, dict) or set(value) != {'content', 'client_id'}:
+            return None
+        inputs, client_id = value['content'], value['client_id']
+    else:
+        names = [k for k in ('clientUserMessageId', 'client_user_message_id') if k in payload]
+        if len(names) != 1 or set(payload) - {names[0], 'input', 'id'}:
+            return None
+        if 'id' in payload and payload['id'] != queue_id:
+            return None
+        inputs, client_id = payload.get('input'), payload[names[0]]
+    if (not isinstance(client_id, str) or not ID.fullmatch(client_id)
+            or not isinstance(inputs, list) or len(inputs) != 1):
+        return None
+    item = inputs[0]
+    if (not isinstance(item, dict) or set(item) - {'type', 'text', 'text_elements'}
+            or item.get('type') != 'text' or not isinstance(item.get('text'), str)
+            or item.get('text_elements', []) != []):
+        return None
+    item['text'].encode('utf-8', errors='strict')
+    return {'text': item['text'], 'client_id': client_id}
+
+
+def _check_schema(db: sqlite3.Connection) -> None:
+    db.execute('PRAGMA query_only=ON')
+    columns = db.execute('PRAGMA table_info(queued_items)').fetchall()
+    if (not columns or tuple(row[1] for row in columns) != QUEUE_COLUMNS or columns[0][5] != 1):
+        raise ValueError('unsupported-native-queue-schema')
+
+
+def read_server_queue(path: Path, thread_id: str) -> list[dict]:
+    """Bounded read-only projection; unknown payloads must not look like an empty queue."""
+    if not ID.fullmatch(thread_id):
+        raise ValueError('invalid-queue-identity')
+    db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0.15)
+    try:
+        _check_schema(db)
+        rows = db.execute('SELECT id, CASE WHEN length(payload_json)<=32768 '
+                          'THEN payload_json ELSE NULL END FROM queued_items WHERE thread_id=? '
+                          'ORDER BY queue_order,id LIMIT 201', (thread_id,)).fetchall()
+        if len(rows) > 200:
+            raise ValueError('native-queue-too-large')
+        result = []
+        for queue_id, raw in rows:
+            if not isinstance(queue_id, str) or not ID.fullmatch(queue_id) or not isinstance(raw, str):
+                raise ValueError('unsupported-native-queue-item')
+            value = text_payload(json.loads(raw), queue_id)
+            if value is None:
+                raise ValueError('unsupported-native-queue-payload')
+            result.append({'id': queue_id, 'text': value['text'],
+                           'submission': {'status': 'queued', 'hostId': 'local'},
+                           '_server_queue': {'client_id': value['client_id']}})
+        return result
+    finally:
+        db.close()
+
+
 def read_queued_item(path: Path, thread_id: str, queue_id: str,
                      *, text_digest: str | None = None) -> dict | None:
     """At most one primary-key lookup in Codex's queue DB, using WAL-aware read-only SQLite.
@@ -45,11 +107,7 @@ def read_queued_item(path: Path, thread_id: str, queue_id: str,
         raise ValueError('invalid-queue-identity')
     db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=0.15)
     try:
-        db.execute('PRAGMA query_only=ON')
-        columns = db.execute('PRAGMA table_info(queued_items)').fetchall()
-        if (not columns or tuple(row[1] for row in columns) != QUEUE_COLUMNS
-                or columns[0][5] != 1):
-            raise ValueError('unsupported-native-queue-schema')
+        _check_schema(db)
         # Bound the payload before transferring it from SQLite to Python.
         row = db.execute('SELECT thread_id, CASE WHEN length(payload_json)<=32768 '
                          'THEN payload_json ELSE NULL END FROM queued_items WHERE id=?', (queue_id,)).fetchone()
@@ -61,28 +119,12 @@ def read_queued_item(path: Path, thread_id: str, queue_id: str,
         if not isinstance(row[1], str):
             return result
         try:
-            payload = json.loads(row[1])
-            if not isinstance(payload, dict):
+            payload = text_payload(json.loads(row[1]), queue_id)
+            if payload is None:
                 return result
-            # The schema uses clientUserMessageId; the internal serialized form
-            # may use snake_case. Mixed aliases or non-text data fail closed.
-            names = [k for k in ('clientUserMessageId', 'client_user_message_id') if k in payload]
-            if len(names) != 1 or set(payload) - {names[0], 'input', 'id'}:
-                return result
-            if 'id' in payload and payload['id'] != queue_id:
-                return result
-            inputs, client_id = payload.get('input'), payload[names[0]]
-            if (not isinstance(client_id, str) or not ID.fullmatch(client_id)
-                    or not isinstance(inputs, list) or len(inputs) != 1):
-                return result
-            item = inputs[0]
-            if (not isinstance(item, dict) or set(item) - {'type', 'text', 'text_elements'}
-                    or item.get('type') != 'text' or not isinstance(item.get('text'), str)
-                    or item.get('text_elements', []) != []):
-                return result
-            if text_digest is not None and digest(item['text']) != text_digest:
+            if text_digest is not None and digest(payload['text']) != text_digest:
                 raise ValueError('queued-input-changed')
-            return {**result, 'client_id': client_id, 'payload_verified': True}
+            return {**result, 'client_id': payload['client_id'], 'payload_verified': True}
         except (json.JSONDecodeError, UnicodeError):
             return result
     finally:

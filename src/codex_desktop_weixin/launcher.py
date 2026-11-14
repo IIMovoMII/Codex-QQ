@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import select
 import signal
 import shutil
 import socket
@@ -354,7 +355,7 @@ def _socket_is_reachable(path: Path) -> bool | None:
     """Return True/False when this Python build can probe AF_UNIX, else None."""
     family = getattr(socket, "AF_UNIX", None)
     if family is None:
-        return None
+        return _windows_socket_is_reachable(path) if os.name == 'nt' else None
     try:
         stream = socket.socket(family, socket.SOCK_STREAM)
     except OSError:
@@ -370,6 +371,34 @@ def _socket_is_reachable(path: Path) -> bool | None:
         return False
     finally:
         stream.close()
+
+
+def _windows_socket_is_reachable(path: Path) -> bool | None:
+    # Windows supports AF_UNIX even when CPython does not expose its address
+    # conversion. Let Python own the socket; use Winsock only for sockaddr_un.
+    encoded = str(path).encode('utf-8')
+    if len(encoded) >= 108 or b'\0' in encoded:
+        return None
+    address = ctypes.create_string_buffer(b'\x01\x00' + encoded + b'\0', 110)
+    winsock = ctypes.WinDLL('ws2_32', use_last_error=True)
+    winsock.connect.argtypes = [ctypes.c_size_t, ctypes.c_void_p, ctypes.c_int]
+    winsock.connect.restype = ctypes.c_int
+    winsock.WSAGetLastError.argtypes = []
+    winsock.WSAGetLastError.restype = ctypes.c_int
+    try:
+        with socket.socket(1, socket.SOCK_STREAM) as stream:
+            stream.setblocking(False)
+            if winsock.connect(stream.fileno(), address, len(address)) == 0:
+                return True
+            error = winsock.WSAGetLastError()
+            if error in (10035, 10036, 10037):
+                _, writable, exceptional = select.select([], [stream], [stream], 0.3)
+                if not writable and not exceptional:
+                    return None
+                error = stream.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            return True if error == 0 else False if error in (10049, 10061) else None
+    except OSError:
+        return None
 
 
 def _directory_contains_name(path: Path) -> bool:

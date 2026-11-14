@@ -1,0 +1,31 @@
+{
+  "name": "codex-qq-desktop",
+  "private": true,
+  "version": "1.0.2",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "playwright test",
+    "tauri": "tauri",
+    "desktop:prepare": "py -3.13 -X utf8 ../tools/prepare_desktop_package.py",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "npm run build && npm run desktop:prepare && tauri build --target x86_64-pc-windows-gnu"
+  },
+  "dependencies": {
+    "@lucide/svelte": "1.72.0",
+    "@tauri-apps/api": "2.12.4",
+    "svelte": "5.57.3"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.0",
+    "@sveltejs/vite-plugin-svelte": "7.3.1",
+    "@tauri-apps/cli": "^2.12.4",
+    "@tsconfig/svelte": "5.0.9",
+    "svelte-check": "4.7.8",
+    "typescript": "6.0.3",
+    "vite": "8.3.8"
+  }
+}

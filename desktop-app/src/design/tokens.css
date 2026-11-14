@@ -1,0 +1,117 @@
+:root {
+  font-family: "Segoe UI Variable", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  font-synthesis: none;
+  color-scheme: light;
+  --page: #f4f5f7;
+  --page-2: #eef2fa;
+  --ink: #20232a;
+  --ink-soft: #495366;
+  --muted: #687286;
+  --faint: #8993a4;
+  --blue: #0877ed;
+  --blue-dark: #005cc8;
+  --blue-wash: rgba(34, 130, 244, .105);
+  --lilac-wash: rgba(180, 163, 239, .16);
+  --mint-wash: rgba(135, 223, 202, .18);
+  --surface: rgba(255, 255, 255, .64);
+  --surface-strong: rgba(255, 255, 255, .78);
+  --glass: rgba(249, 251, 255, .5);
+  --glass-raised: rgba(252, 253, 255, .72);
+  --line: rgba(126, 145, 177, .18);
+  --line-strong: rgba(125, 147, 183, .27);
+  --success: #198646;
+  --success-wash: #e6f7ec;
+  --warning: #9b6412;
+  --warning-wash: #fff3da;
+  --danger: #ad3434;
+  --danger-wash: #ffe9e7;
+  --info: #116cbf;
+  --info-wash: #e8f3ff;
+  --shadow-contact: 0 1px 2px rgba(20, 35, 65, .045);
+  --shadow-panel: 0 14px 36px rgba(55, 74, 112, .075), 0 3px 10px rgba(38, 48, 76, .035);
+  --shadow-float: 0 32px 88px rgba(30, 44, 78, .2), 0 5px 20px rgba(35, 48, 74, .1);
+  --radius-input: 10px;
+  --radius-button: 12px;
+  --radius-surface: 20px;
+  --radius-float: 24px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
+  --sidebar: 264px;
+  --titlebar: 62px;
+  font-size: 16px;
+  line-height: 1.55;
+  letter-spacing: 0;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #15171b;
+  --page-2: #1a1c23;
+  --ink: #f2f4f7;
+  --ink-soft: #d0d6df;
+  --muted: #a9b2c0;
+  --faint: #818c9d;
+  --blue: #6aaeff;
+  --blue-dark: #3787ed;
+  --blue-wash: rgba(83, 159, 255, .17);
+  --lilac-wash: rgba(171, 146, 255, .12);
+  --mint-wash: rgba(87, 208, 177, .1);
+  --surface: rgba(38, 42, 50, .66);
+  --surface-strong: rgba(44, 48, 57, .84);
+  --glass: rgba(31, 35, 43, .66);
+  --glass-raised: rgba(43, 47, 56, .82);
+  --line: rgba(185, 198, 222, .12);
+  --line-strong: rgba(185, 198, 222, .2);
+  --success: #66d596;
+  --success-wash: rgba(52, 174, 109, .16);
+  --warning: #f0bb65;
+  --warning-wash: rgba(188, 126, 35, .17);
+  --danger: #ff8383;
+  --danger-wash: rgba(195, 63, 63, .18);
+  --info: #82bdff;
+  --info-wash: rgba(64, 139, 224, .18);
+  --shadow-contact: 0 1px 2px rgba(0, 0, 0, .16);
+  --shadow-panel: 0 14px 40px rgba(0, 0, 0, .17), 0 3px 10px rgba(0, 0, 0, .1);
+  --shadow-float: 0 32px 88px rgba(0, 0, 0, .52), 0 5px 20px rgba(0, 0, 0, .22);
+}
+
+:root[data-transparent="false"] {
+  --surface: #fff;
+  --surface-strong: #fff;
+  --glass: rgba(245, 247, 250, .97);
+  --glass-raised: #fff;
+  --shadow-panel: 0 3px 14px rgba(55, 74, 112, .06);
+}
+:root[data-theme="dark"][data-transparent="false"] {
+  --surface: #22252b;
+  --surface-strong: #282b32;
+  --glass: #202329;
+  --glass-raised: #292d34;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root[data-theme="system"] {
+    color-scheme: dark;
+    --page: #15171b; --page-2: #1a1c23; --ink: #f2f4f7; --ink-soft: #d0d6df;
+    --muted: #a9b2c0; --faint: #818c9d; --blue: #6aaeff; --blue-dark: #3787ed;
+    --blue-wash: rgba(83, 159, 255, .17); --lilac-wash: rgba(171, 146, 255, .12);
+    --mint-wash: rgba(87, 208, 177, .1); --surface: rgba(38, 42, 50, .66);
+    --surface-strong: rgba(44, 48, 57, .84); --glass: rgba(31, 35, 43, .66);
+    --glass-raised: rgba(43, 47, 56, .82); --line: rgba(185, 198, 222, .12);
+    --line-strong: rgba(185, 198, 222, .2); --success: #66d596;
+    --success-wash: rgba(52, 174, 109, .16); --warning: #f0bb65;
+    --warning-wash: rgba(188, 126, 35, .17); --danger: #ff8383;
+    --danger-wash: rgba(195, 63, 63, .18); --info: #82bdff;
+    --info-wash: rgba(64, 139, 224, .18); --shadow-contact: 0 1px 2px rgba(0, 0, 0, .16);
+    --shadow-panel: 0 14px 40px rgba(0, 0, 0, .17), 0 3px 10px rgba(0, 0, 0, .1);
+    --shadow-float: 0 32px 88px rgba(0, 0, 0, .52), 0 5px 20px rgba(0, 0, 0, .22);
+  }
+  :root[data-theme="system"][data-transparent="false"] {
+    --surface: #22252b; --surface-strong: #282b32; --glass: #202329; --glass-raised: #292d34;
+  }
+}

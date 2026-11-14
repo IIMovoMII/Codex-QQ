@@ -5,3 +5,4 @@
 *.yml text eol=lf
 *.cs text eol=lf
 *.cmd text eol=crlf
+desktop-app/licenses/** -text -whitespace

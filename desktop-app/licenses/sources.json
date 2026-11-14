@@ -1,0 +1,52 @@
+[
+  {
+    "repository": "https://github.com/dropbox/rust-alloc-no-stdlib",
+    "commit": "0a81fd6928ea3b33c8cd484aa4575d50ffb98012",
+    "file": "desktop-app/licenses/upstream/dropbox-rust-alloc-no-stdlib-0a81fd6928ea/LICENSE",
+    "source": "https://raw.githubusercontent.com/dropbox/rust-alloc-no-stdlib/0a81fd6928ea3b33c8cd484aa4575d50ffb98012/LICENSE",
+    "sha256": "c0c56f26d9c051cac4d200c34c84e7ae9aaa853e01a982a1df08b09931e518ae"
+  },
+  {
+    "repository": "https://github.com/tauri-apps/tauri",
+    "commit": "59b63ab500da9859f12d8888c3298bc29bba0b92",
+    "file": "desktop-app/licenses/upstream/tauri-apps-tauri-59b63ab500da/LICENSE-APACHE-2.0",
+    "source": "https://raw.githubusercontent.com/tauri-apps/tauri/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-APACHE-2.0",
+    "sha256": "0d542e0c8804e39aa7f37eb00da5a762149dc682d7829451287e11b938e94594"
+  },
+  {
+    "repository": "https://github.com/tauri-apps/tauri",
+    "commit": "59b63ab500da9859f12d8888c3298bc29bba0b92",
+    "file": "desktop-app/licenses/upstream/tauri-apps-tauri-59b63ab500da/LICENSE-MIT",
+    "source": "https://raw.githubusercontent.com/tauri-apps/tauri/59b63ab500da9859f12d8888c3298bc29bba0b92/LICENSE-MIT",
+    "sha256": "9dd42ea92cff2ede5cd477cbfcce051b2d0115c0ac7f368ee88cb545055dff1d"
+  },
+  {
+    "repository": "https://github.com/wravery/webview2-rs",
+    "commit": "edc2caf886175ccaebe86078c9cfe1ae2a187328",
+    "file": "desktop-app/licenses/upstream/wravery-webview2-rs-edc2caf88617/LICENSE",
+    "source": "https://raw.githubusercontent.com/wravery/webview2-rs/edc2caf886175ccaebe86078c9cfe1ae2a187328/LICENSE",
+    "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+  },
+  {
+    "repository": "https://github.com/wravery/webview2-rs",
+    "commit": "dffa41a8a46d3f5565eefbff2de57d38d399f158",
+    "file": "desktop-app/licenses/upstream/wravery-webview2-rs-dffa41a8a46d/LICENSE",
+    "source": "https://raw.githubusercontent.com/wravery/webview2-rs/dffa41a8a46d3f5565eefbff2de57d38d399f158/LICENSE",
+    "sha256": "0dcf41516e608bbcb6cdc5229feb7b86fe4a643b85e7df251133c93408fdac73"
+  },
+  {
+    "file": "desktop-app/licenses/MPL-2.0.txt",
+    "source": "https://www.mozilla.org/MPL/2.0/index.txt",
+    "sha256": "3f3d9e0024b1921b067d6f7f88deb4a60cbe7a78e76c64e3f1d7fc3b779b9d04"
+  },
+  {
+    "file": "desktop-app/licenses/WebView2-SDK-1.0.3800.47.txt",
+    "source": "https://www.nuget.org/packages/Microsoft.Web.WebView2/1.0.3800.47/License",
+    "sha256": "97bf5aab9abfb3b7745c80977e3daf3e3f80ffee36b851568fff385bdbfbe1b8"
+  },
+  {
+    "file": "desktop-app/licenses/Go-1.25.14-LICENSE.txt",
+    "source": "https://raw.githubusercontent.com/golang/go/go1.25.14/LICENSE",
+    "sha256": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
+  }
+]

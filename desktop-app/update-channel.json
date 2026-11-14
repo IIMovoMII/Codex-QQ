@@ -1,0 +1,11 @@
+{
+  "version": "1.0.2",
+  "notes": "# Codex QQ 助手 1.0.2\n\n独立 Windows 桌面应用，通过 QQ 接收 Codex 任务提醒，并按消息引用操作对应对话。\n\n- 中文界面包含概览、QQ 机器人、Codex 连接、通知记录、设置、更新和帮助与诊断；提供深浅主题、分层毛玻璃、动态效果和效果质量设置。\n- 八步首次使用向导覆盖准备、创建机器人说明、本机凭据输入、连接、本人绑定、启动、提醒设置及引用操作；支持稍后续接，已有用户保留原绑定与数据。\n- Windows 登录启动直接进入托盘，避免主窗口先出现再隐藏；手动打开仍可进入界面。\n- 统一原生窗口、WebView 与页面底色，修正拖动边框缩放时露出的黑色底层；窗口尺寸适配、短窗口滚动与布局恢复继续生效。\n- 无法核实的钩子状态不再显示待确认警告；已安装和启用的配置按实际状态显示。\n- 安装包内置 Python 与配套 QQ 网关，无需 Node.js、Python 开发环境或开发服务器。缺少 WebView2 时由安装器调用微软官方安装程序，需要网络。\n- 安装升级保留 QQ 绑定与数据；安装中断和健康检查失败可恢复原程序。更新验证签名、签名版本与哈希；卸载保留运行数据及其他程序的处理项。\n\n下载 `CodexQQ-Setup-1.0.2-windows-x64.exe`，按中文安装器提示操作。首次使用需要自己的 QQ 官方机器人，AppSecret 仅在本机填写。Windows 设置中启用本应用的登录自启后，助手在托盘运行；关闭窗口继续后台运行，退出应用会停止本应用服务。\n\n在 QQ 中右键机器人回执，左键“引用”，核对输入框预览后发送内容，可操作对应 Codex 对话。异步问题需在电脑回答；普通同步问题回答仍待用户补充体验。\n\n验证：606 项 Python 回归、5 项 Rust 测试、12 项系统 Edge 页面测试、Svelte 类型检查及正式构建通过；同一安装包通过实际升级、覆盖中断恢复、健康失败回退及卸载保留测试。QQ 引用与通知实收、真实登录自启和适配矩阵已有验收。首次使用与干净 Windows 安装按代码逻辑验收，未做真实首次绑定或全新系统测试；瞬时缩放黑边按代码修复，仍需用户体验确认。\n\n发行资产附更新签名、SHA-256、依赖清单与第三方许可证。尚未配置 Windows Authenticode 代码签名。\n",
+  "pub_date": "2026-11-14T07:15:47.549192+00:00",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTbGh3Y3NEdmtZbzhkbkpKZ0llK2Q2Nm51VWppRHZGQndyZlBCMGVHQlhJdEpLNnNudCtoRlgwYXBTbE5iY2ZvUWNRSlorZGJNeFhndnhBU3dZZ2pYTVhJcUw1Sm42YVFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk0NjM5NDc4CWZpbGU6Q29kZXggUVEg5Yqp5omLXzEuMC4yX3g2NC1zZXR1cC5leGUJdmVyc2lvbjoxLjAuMgpveG4yRkdHOEFGUFhnNlFpQldpb3krMzAxOE1vRlFySGVxd3hvUDRGZGJ6Z25GU2J0eVZDbjY4Y1dHNHFIeW5uQSt1T3pxUUhJeWoxY0VRQXVHWlNDZz09Cg==",
+      "url": "https://github.com/IIMovoMII/Codex-QQ/releases/download/app-v1.0.2/CodexQQ-Setup-1.0.2-windows-x64.exe"
+    }
+  }
+}

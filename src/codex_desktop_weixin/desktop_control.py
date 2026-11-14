@@ -277,7 +277,7 @@ def pause_desktop(thread_id: str, *, expected_connection: str | None = None,
                 raise DesktopControlError("invalid-response")
             if result.get("goalPauseError"):
                 return True, "本轮已停止，但自动任务目标暂停失败；请在 Desktop 检查，可能还会自动续跑。"
-            return True, "已通过 Desktop 原生停止功能暂停本轮；可发送 /continue 继续。"
+            return True, "已通过 Desktop 原生停止功能暂停本轮；引用本对话回执回复“继续”可开始新一轮。原有排队消息仍由 Codex 管理。"
     except (TimeoutError, OSError) as error:
         if sent:
             return False, f"interrupt-turn 调用后连接中断（{public_error_code(error)}），没有收到 ok=true 和 interruptedTurnId 回执；暂停可能已生效。不会重试，请查看目标对话是否仍在运行。"

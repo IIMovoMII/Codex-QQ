@@ -26,27 +26,30 @@ PROJECT = Path(__file__).resolve().parents[2]
 APP_EXE = PROJECT / 'bin' / 'CodexQQ助手.exe'
 
 
-def startup_command(executable: Path = APP_EXE) -> str:
+def startup_command(executable: Path = APP_EXE, *, start_hidden: bool = False) -> str:
     if not executable.is_absolute() or not executable.is_file():
         raise ValueError('app-executable-missing')
-    return subprocess.list2cmdline([str(executable)])
+    arguments = [str(executable)]
+    if start_hidden:
+        arguments.append('--startup')
+    return subprocess.list2cmdline(arguments)
 
 
-def startup_enabled(executable: Path = APP_EXE, *, registry=None) -> bool:
+def startup_enabled(executable: Path = APP_EXE, *, start_hidden: bool = False, registry=None) -> bool:
     if registry is None:
         import winreg as registry
     try:
         with registry.OpenKey(registry.HKEY_CURRENT_USER, RUN_KEY, 0, registry.KEY_READ) as key:
             value, kind = registry.QueryValueEx(key, RUN_VALUE)
-        return kind == registry.REG_SZ and value == startup_command(executable)
+        return kind == registry.REG_SZ and value == startup_command(executable, start_hidden=start_hidden)
     except FileNotFoundError:
         return False
 
 
-def set_startup(enabled: bool, executable: Path = APP_EXE, *, registry=None) -> None:
+def set_startup(enabled: bool, executable: Path = APP_EXE, *, start_hidden: bool = False, registry=None) -> None:
     if registry is None:
         import winreg as registry
-    expected = startup_command(executable)
+    expected = startup_command(executable, start_hidden=start_hidden)
     with registry.CreateKeyEx(registry.HKEY_CURRENT_USER, RUN_KEY, 0,
                               registry.KEY_READ | registry.KEY_SET_VALUE) as key:
         try:

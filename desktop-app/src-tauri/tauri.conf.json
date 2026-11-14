@@ -1,0 +1,87 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Codex QQ 助手",
+  "version": "1.0.2",
+  "identifier": "com.codexqq.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1421",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Codex QQ 助手",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 720,
+        "minHeight": 440,
+        "center": true,
+        "resizable": true,
+        "maximizable": true,
+        "decorations": true,
+        "visible": false,
+        "backgroundColor": "#f4f5f7",
+        "transparent": false,
+        "shadow": true
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' asset: data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "publisher": "CodexQQ",
+    "targets": [
+      "nsis"
+    ],
+    "createUpdaterArtifacts": true,
+    "icon": [
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "resources/python/": "python/",
+      "resources/backend/": "backend/",
+      "resources/tools/": "tools/",
+      "resources/licenses/": "licenses/",
+      "resources/build-manifest.json": "build-manifest.json",
+      "resources/gateway.exe": "gateway.exe",
+      "../../LICENSE": "LICENSE",
+      "../../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md"
+    },
+    "windows": {
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "languages": [
+          "SimpChinese"
+        ],
+        "displayLanguageSelector": false,
+        "installMode": "currentUser",
+        "startMenuFolder": "Codex QQ 助手",
+        "installerIcon": "icons/icon.ico",
+        "compression": "lzma",
+        "template": "installer/template.nsi",
+        "installerHooks": "installer/hooks.nsh"
+      },
+      "allowDowngrades": false
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEzMThGOTBFMkMwNzg3QTUKUldTbGh3Y3NEdmtZbzJwRkxLZlNXdmhvWHIxL3RHTkpFUnV4NUpWOWNuVS9hQWpVZi9aM1FFT04K",
+      "requireSignedVersion": true,
+      "endpoints": [
+        "https://raw.githubusercontent.com/IIMovoMII/Codex-QQ/main/desktop-app/update-channel.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

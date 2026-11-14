@@ -124,7 +124,7 @@ class ActionRouterTests(unittest.TestCase):
     def test_queue_selection_converts_or_deletes_exact_id_without_confirmation(self):
         card = self.send('/use ' + THREAD_A)
         listing = self.send('队列', quote=card)
-        self.assertIn('可能不含服务端', listing)
+        self.assertIn('远端完整性未知', listing)
         selected = self.send('1', quote=listing)
         self.assertIn('中文排队', self.send('状态', quote=selected))
         guided = self.send('引导', quote=selected, message_id='queue-guide')
@@ -460,6 +460,31 @@ class NativeActionTests(unittest.TestCase):
         with patch.object(self.backend, 'call') as call:
             self.assertEqual(self.backend.remove_saved_queue_item(THREAD, entry, catalog)['state'], 'rejected')
             call.assert_not_called()
+
+    def test_server_queue_removal_and_conversion_verify_native_identity_and_exact_text(self):
+        from test_submission_receipts import QUEUE, CLIENT, TEXT
+        raw = {'id': QUEUE, 'text': TEXT, 'submission': {'hostId': 'local', 'status': 'queued'},
+               '_server_queue': {'client_id': CLIENT}}
+        entry = normalize_saved_queue([raw])[0]
+        catalog = type('Catalog', (), {'saved_queue': lambda _, t: [entry],
+                                      'saved_queue_rows': lambda _, t: [raw]})()
+        removed = {'message': {'id': QUEUE, 'text': TEXT, 'context': {'cwd': 'C:\\test'}},
+                   'serverSubmission': {'id': QUEUE, 'clientUserMessageId': CLIENT,
+                                        'input': [{'type': 'text', 'text': TEXT, 'text_elements': []}]}}
+        self.state.update(turn={'status': 'inProgress', 'turnId': 'running-turn'}, cwd='C:\\test')
+        with patch.object(self.backend, 'call', return_value={'state': 'confirmed', 'result': {'removed': removed}}), \
+                patch.object(self.backend, 'steer', return_value={'state': 'confirmed'}) as guide:
+            self.assertEqual(self.backend.remove_saved_queue_item(THREAD, entry, catalog)['state'], 'confirmed')
+            self.assertEqual(self.backend.guide_saved_queue_item(THREAD, entry, catalog, 'conn')['state'], 'confirmed')
+            self.assertEqual(guide.call_args.args[:3], (THREAD, TEXT, 'conn'))
+        for changed in ({**removed, 'serverSubmission': {**removed['serverSubmission'], 'clientUserMessageId': QUEUE}},
+                        {**removed, 'message': {**removed['message'], 'text': 'different'}},
+                        {'message': removed['message']}):
+            with self.subTest(removed=changed), \
+                    patch.object(self.backend, 'call', return_value={'state': 'confirmed', 'result': {'removed': changed}}), \
+                    patch.object(self.backend, 'steer') as guide:
+                self.assertEqual(self.backend.guide_saved_queue_item(THREAD, entry, catalog, 'conn')['state'], 'unknown')
+                guide.assert_not_called()
 
     def test_queue_conversion_deletes_before_guiding_exact_text_and_stops_on_uncertain_delete(self):
         raw = saved_entry()

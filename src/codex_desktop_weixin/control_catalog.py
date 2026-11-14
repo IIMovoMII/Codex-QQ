@@ -47,15 +47,15 @@ class LocalCatalog:
             db.close()
 
     def saved_queue(self, thread_id: str) -> list[dict]:
-        """Desktop local saved queue only, never claims server-queue completeness."""
+        """Verified local saved and server queue records; remote completeness is unknown."""
         return normalize_saved_queue(self.saved_queue_rows(thread_id))
 
     def saved_queue_rows(self, thread_id: str) -> list[dict]:
-        """Return a bounded, unchanged copy of one Desktop queue snapshot.
+        """Read saved UI rows and the current CLI's server queue, without writing either.
 
-        The native follower setter replaces a snapshot, so queue writers must
-        preserve every existing local row. Cross-host rows are rejected instead
-        of being silently dropped by the display-only normalizer.
+        Server rows carry explicit identity metadata because a native removal
+        returns a UI projection rather than the serialized database payload.
+        Cross-host rows and duplicate IDs fail closed.
         """
         if not 0 < self.global_path.stat().st_size <= 8 * 1024 * 1024:
             raise ValueError('desktop-state-too-large')
@@ -67,8 +67,12 @@ class LocalCatalog:
         if not isinstance(rows, list) or len(rows) > 200:
             raise ValueError('unsupported-local-queue')
         for row in rows:
-            if not isinstance(row, dict) or not isinstance(row.get('submission') or {}, dict):
+            if (not isinstance(row, dict) or not isinstance(row.get('submission') or {}, dict)
+                    or '_server_queue' in row):
                 raise ValueError('invalid-queue-submission')
+        if self.queue_path.exists():
+            from submission_receipts import read_server_queue
+            rows = rows + read_server_queue(self.queue_path, thread_id)
         normalized = normalize_saved_queue(rows)
         if len(normalized) != len(rows):
             raise ValueError('cross-host-queue')

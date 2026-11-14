@@ -19,7 +19,8 @@ def check() -> list[str]:
     total = 0
     for name in filter(None, names):
         path = ROOT / name
-        if (path.name in PRIVATE or path.suffix in ('.exe', '.dll', '.sqlite', '.db', '.jsonl', '.log')
+        if ((path.name in PRIVATE and name != 'desktop-app/src-tauri/.cargo/config.toml')
+                or path.suffix in ('.exe', '.dll', '.sqlite', '.db', '.jsonl', '.log')
                 or any(x in ('.build', 'bin', 'logs', 'outbox', 'spool', '__pycache__') for x in Path(name).parts)):
             errors.append(name + ': private/runtime file is tracked')
             continue
@@ -28,6 +29,10 @@ def check() -> list[str]:
             continue
         blob = path.read_bytes()
         total += len(blob)
+        if name == 'desktop-app/src-tauri/icons/icon.ico':
+            if not blob.startswith(b'\x00\x00\x01\x00') or len(blob) > 256_000:
+                errors.append(name + ': invalid application icon')
+            continue
         if len(blob) > 2_000_000:
             errors.append(name + ': unexpectedly large source file')
         try:

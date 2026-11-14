@@ -1,0 +1,29 @@
+github.com/mattn/go-localereader v0.0.1
+Source: https://proxy.golang.org/github.com/mattn/go-localereader/@v/v0.0.1.zip
+Checksum: h1:ygSAOl7ZXTx4RdPYinUpg6W99U8jWvWi9Ye2JC/oIi4=
+
+github.com/mattn/go-localereader@v0.0.1/README.md
+# go-localereader
+
+CodePage decoder for Windows
+
+## Usage
+
+```
+io.Copy(os.Stdout, localereader.NewAcpReader(bytes.Reader(bytesSjis)))
+```
+
+## Installation
+
+```
+$ go get github.com/mattn/go-localereader
+```
+
+## License
+
+MIT
+
+## Author
+
+Yasuhiro Matsumoto (a.k.a. mattn)
+

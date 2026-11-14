@@ -33,3 +33,19 @@ outbox/
 spool/
 .DS_Store
 Thumbs.db
+
+# Desktop frontend dependencies and generated verification artifacts.
+node_modules/
+/desktop-app/dist/
+/desktop-app/test-results/
+/desktop-app/playwright-report/
+/desktop-app/.playwright-cli/
+/desktop-app/src-tauri/target/
+/desktop-app/src-tauri/gen/
+!/desktop-app/src-tauri/.cargo/config.toml
+/desktop-app/src-tauri/resources/python/
+/desktop-app/src-tauri/resources/gateway.exe
+/desktop-app/src-tauri/resources/backend/
+/desktop-app/src-tauri/resources/tools/
+/desktop-app/src-tauri/resources/build-manifest.json
+/desktop-app/src-tauri/resources/licenses/

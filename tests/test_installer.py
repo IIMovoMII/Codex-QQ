@@ -18,8 +18,10 @@ from installer import (
     enable_hooks_feature,
     hooks_feature_enabled,
     install_hooks,
+    managed_hooks_need_path_update,
     merge_hooks_document,
     remove_managed_hooks,
+    update_managed_hook_paths,
     uninstall_hooks,
 )
 
@@ -169,6 +171,44 @@ hooks = false
 
             uninstall_hooks(codex_home)
             self.assertEqual(json.loads(hooks_path.read_text(encoding="utf-8")), original_hook)
+
+    def test_desktop_migration_updates_only_managed_hook_commands(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            codex_home = root / "codex"
+            codex_home.mkdir()
+            config = codex_home / "config.toml"
+            config.write_text("model = 'preserved'\n[features]\nhooks = false\n", encoding="utf-8")
+            original_config = config.read_bytes()
+            old_command = build_hook_command(root / "old" / "src" / "codex_desktop_weixin" / "cli.py")
+            hooks_path = codex_home / "hooks.json"
+            original = {
+                "custom": {"keep": True},
+                "hooks": {"Stop": [{
+                    "matcher": "*",
+                    "description": "keep group metadata",
+                    "hooks": [
+                        {"type": "command", "command": "other-hook"},
+                        {"type": "command", "command": old_command,
+                         "commandWindows": old_command, "timeout": 3},
+                    ],
+                }]},
+            }
+            hooks_path.write_text(json.dumps(original), encoding="utf-8")
+            self.assertTrue(managed_hooks_need_path_update(codex_home, PACKAGE_DIR / "cli.py"))
+
+            result = update_managed_hook_paths(codex_home, PACKAGE_DIR / "cli.py", data_dir=root / "runtime")
+
+            self.assertTrue(result["changed"])
+            self.assertTrue((Path(result["backup_dir"]) / "hooks.json").is_file())
+            updated = json.loads(hooks_path.read_text(encoding="utf-8"))
+            handlers = updated["hooks"]["Stop"][0]["hooks"]
+            self.assertEqual(handlers[0], original["hooks"]["Stop"][0]["hooks"][0])
+            self.assertEqual(handlers[1]["command"], build_hook_command(PACKAGE_DIR / "cli.py"))
+            self.assertEqual(handlers[1]["commandWindows"], build_hook_command(PACKAGE_DIR / "cli.py"))
+            self.assertEqual(updated["custom"], original["custom"])
+            self.assertFalse(managed_hooks_need_path_update(codex_home, PACKAGE_DIR / "cli.py"))
+            self.assertEqual(config.read_bytes(), original_config)
 
 
 if __name__ == "__main__":

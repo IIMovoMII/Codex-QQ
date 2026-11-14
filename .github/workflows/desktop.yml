@@ -1,0 +1,67 @@
+name: 桌面应用检查
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: desktop-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      PYTHONUTF8: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: desktop-app/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable-x86_64-pc-windows-gnu
+          targets: x86_64-pc-windows-gnu
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: mingw-w64-ucrt-x86_64-gcc
+          path-type: inherit
+      - name: 固定前端依赖、类型与页面测试（系统 Edge）
+        working-directory: desktop-app
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm run check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: Python 完整回归
+        run: python -X utf8 -m unittest discover -s tests -q
+      - name: 发布边界
+        run: python -X utf8 tools/check_publication.py
+      - name: 原生 release 编译与内置运行时（不生成未经签名的发行包）
+        shell: pwsh
+        run: |
+          $env:PATH = "C:\msys64\ucrt64\bin;$env:PATH"
+          ./tools/build_desktop.ps1 -NoBundle
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Push-Location desktop-app/src-tauri
+          cargo test --locked --target x86_64-pc-windows-gnu
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Pop-Location
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: desktop-diagnostics-${{ github.sha }}
+          path: desktop-app/test-results/
+          if-no-files-found: ignore
+          retention-days: 7

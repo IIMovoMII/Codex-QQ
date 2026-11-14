@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import closing
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "codex_desktop_weixin"))
 from control_catalog import LocalCatalog
@@ -58,6 +59,42 @@ class CatalogTests(unittest.TestCase):
                 {**row, 'submission': {'hostId': 'remote', 'status': 'queued'}}]}}, ensure_ascii=False), encoding='utf-8')
             with self.assertRaisesRegex(ValueError, 'cross-host-queue'):
                 catalog.saved_queue_rows('target')
+
+    def test_current_cli_queue_is_listed_with_saved_rows_without_writing_either(self):
+        from test_submission_receipts import QueueFixture, THREAD_A, QUEUE, CLIENT, TEXT
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue = QueueFixture(root / 'queue_1.sqlite')
+            queue.add(payload={'UserInput': {'content': [{'type': 'text', 'text': TEXT, 'text_elements': []}],
+                                             'client_id': CLIENT}})
+            path = root / '.codex-global-state.json'
+            saved = {'id': 'saved-row', 'text': 'existing', 'submission': {'hostId': 'local', 'status': 'queued'}}
+            path.write_text(json.dumps({'queued-follow-ups': {THREAD_A: [saved]}}), encoding='utf-8')
+            before = path.read_bytes(), queue.path.read_bytes()
+            rows = LocalCatalog(root).saved_queue(THREAD_A)
+            self.assertEqual([row['id'] for row in rows], ['saved-row', QUEUE])
+            self.assertEqual(rows[1]['summary'], TEXT)
+            self.assertEqual(rows[1]['server_client_id'], CLIENT)
+            self.assertEqual((path.read_bytes(), queue.path.read_bytes()), before)
+            self.assertEqual(LocalCatalog(root).saved_queue(QUEUE), [])
+            queue.add(payload={'UserInput': {'content': [], 'client_id': CLIENT}})
+            with self.assertRaisesRegex(ValueError, 'unsupported-native-queue-payload'):
+                LocalCatalog(root).saved_queue(THREAD_A)
+
+    def test_queue_duplicate_identity_and_future_schema_never_hide_server_items(self):
+        from test_submission_receipts import QueueFixture, THREAD_A, QUEUE
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            queue = QueueFixture(root / 'queue_1.sqlite')
+            path = root / '.codex-global-state.json'
+            path.write_text(json.dumps({'queued-follow-ups': {THREAD_A: [{'id': QUEUE, 'text': 'other'}]}}), encoding='utf-8')
+            with self.assertRaisesRegex(ValueError, 'ambiguous-queued-message'):
+                LocalCatalog(root).saved_queue(THREAD_A)
+            path.write_text(json.dumps({'queued-follow-ups': {}}), encoding='utf-8')
+            with closing(sqlite3.connect(queue.path)) as db, db:
+                db.execute('ALTER TABLE queued_items ADD COLUMN future TEXT')
+            with self.assertRaisesRegex(ValueError, 'unsupported-native-queue-schema'):
+                LocalCatalog(root).saved_queue(THREAD_A)
 
     def test_models_use_explicit_catalog_and_reject_duplicate_identifiers(self):
         with tempfile.TemporaryDirectory() as tmp:

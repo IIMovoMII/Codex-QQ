@@ -114,6 +114,16 @@ class StartupTests(unittest.TestCase):
             self.assertEqual(registry.values, {'OtherApp': ('untouched', 1)})
             set_startup(False, executable, registry=registry)
 
+    def test_startup_argument_targets_tray_start_for_desktop_host(self):
+        with tempfile.TemporaryDirectory() as temp:
+            executable = Path(temp) / '中文 空格 助手.exe'
+            executable.touch()
+            registry = Registry()
+            set_startup(True, executable, start_hidden=True, registry=registry)
+            self.assertEqual(registry.values[RUN_VALUE][0], startup_command(executable, start_hidden=True))
+            self.assertTrue(startup_enabled(executable, start_hidden=True, registry=registry))
+            self.assertFalse(startup_enabled(executable, registry=registry))
+
     def test_conflicting_or_invalid_entry_is_preserved_not_overwritten(self):
         with tempfile.TemporaryDirectory() as temp:
             executable = Path(temp) / 'app.exe'

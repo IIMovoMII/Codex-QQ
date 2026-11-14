@@ -13,7 +13,7 @@
 [![配套网关](https://img.shields.io/github/v/release/IIMovoMII/Codex-QQ?label=配套网关)](https://github.com/IIMovoMII/Codex-QQ/releases)
 [![MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-[一句话安装](#一句话安装) · [操作手册](docs/usage.md) · [回复与动作对照](docs/reply-action-reference.md) · [常见问题](docs/troubleshooting.md) · [参与开发](docs/development.md)
+[桌面应用](#桌面应用) · [一句话安装](#一句话安装) · [操作手册](docs/usage.md) · [回复与动作对照](docs/reply-action-reference.md) · [常见问题](docs/troubleshooting.md) · [参与开发](docs/development.md)
 
 </div>
 
@@ -60,12 +60,18 @@
 - **官方账号、第三方 API 都能用。** 沿用目标对话自己的模型、档位和权限，不接管你的账号切换。
 - **不需要自己的服务器或公网端口。** 本机应用通过 CC Connect 连接 QQ 官方机器人；手机继续用熟悉的 QQ。
 - **独立托盘应用。** 手动启动，可选 Windows 登录自启。退出 Codex 后助手仍在，退出助手也不会关闭 Codex。
-- **尽量轻。** Python 标准库＋Windows 原生托盘＋精简 QQ 网关，没有 Electron；监听增量事件，不把全部历史反复扫一遍。
+- **独立桌面界面。** Tauri / WebView2、Svelte 与随包 Python、精简 QQ 网关；监听增量事件，不把全部历史反复扫一遍。
 - **监控不调用模型。** 状态判断和指令路由不额外消耗模型额度；你安排的任务、引导或压缩照常使用 Codex 额度。
 
 消息会经过 QQ 平台。本项目由社区开发，与 OpenAI、腾讯无隶属关系。
 
 ## 开始使用
+
+### 桌面应用
+
+新版提供中文安装器、首次配置向导、状态概览、QQ 与 Codex 连接、通知记录、设置、更新及诊断页面。安装包内置 Python 和配套网关，使用 Windows WebView2；日常运行无需 Node、开发服务器或单独安装 Python。
+
+[下载 1.0.2 中文安装包](https://github.com/IIMovoMII/Codex-QQ/releases/download/app-v1.0.2/CodexQQ-Setup-1.0.2-windows-x64.exe)，或查看[发行说明与校验文件](https://github.com/IIMovoMII/Codex-QQ/releases/tag/app-v1.0.2)。安装与首次使用流程见[首次安装](docs/install.md)，构建与验收见[桌面开发说明](desktop-app/README.md)。已有用户升级保留原绑定和数据；源码安装入口也继续提供。
 
 ### 一句话安装
 
@@ -79,7 +85,7 @@
 
 ### 手动安装
 
-当前支持 **Windows 10/11 x64**，需要可用的 Codex Desktop、Python 3.11+ 和自己的 QQ 官方机器人。安装向导自动下载并校验本仓库发布的配套网关。
+源码安装支持 **Windows 10/11 x64**，需要可用的 Codex Desktop、Python 3.11+ 和自己的 QQ 官方机器人。安装向导自动下载并校验本仓库发布的配套网关。
 
 ~~~powershell
 git clone https://github.com/IIMovoMII/Codex-QQ.git
