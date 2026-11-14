@@ -13,7 +13,7 @@
 
 ## 中文桌面安装器
 
-从[GitHub 发行页面](https://github.com/IIMovoMII/Codex-QQ/releases/tag/app-v1.0.2)下载 `CodexQQ-Setup-1.0.2-windows-x64.exe`。同页提供 SHA-256、更新签名、许可证和发布说明。
+从[GitHub 发行页面](https://github.com/IIMovoMII/Codex-QQ/releases/tag/app-v1.0.2)下载 `CodexQQ-Setup-1.0.2-windows-x64.exe`。同页提供 `SHA256SUMS.txt`、更新签名、许可证和发布说明；可用 `Get-FileHash .\CodexQQ-Setup-1.0.2-windows-x64.exe -Algorithm SHA256` 与清单核对。Windows Authenticode 代码签名与应用更新签名不同，本版未配置前者。
 
 运行安装器，按中文提示安装到当前用户目录。默认程序路径为 `%LOCALAPPDATA%\Programs\CodexQQ`；日常使用开始菜单中的“Codex QQ 助手”。程序目录内的运行组件需完整保留。
 
@@ -69,13 +69,13 @@
 
 关闭主窗口后助手继续在托盘运行；需要停止时使用“退出助手”。关闭 Codex 不会退出助手，退出助手也不会关闭 Codex。
 
-“设置 → 通用”可开启登录自启，并独立回读 Windows 启用状态。“已配置”需经过下次正常 Windows 登录、服务及 QQ 就绪后，才成为已验证；手动打开应用不能替代该检查。窗口位置异常时使用同页的“重置窗口布局”。
+“设置 → 通用”可开启登录自启，并独立回读 Windows 启用状态。登录启动直接进入托盘；“手动启动时显示”只控制你手动打开应用的行为。“已配置”需经过下次正常 Windows 登录、服务及 QQ 就绪后，才成为已验证；手动打开应用不能替代该检查。窗口位置异常时使用同页的“重置窗口布局”。
 
 卸载前退出助手，在 Windows“已安装的应用”中卸载。卸载器只移除指向本次安装的自启和提醒钩子，保留其他处理项、Codex 配置、QQ 绑定和运行数据。若希望彻底删除个人数据，请在确认不再需要后自行处理上述两个数据目录；不要删除 Codex 自身历史。
 
 ## 源码安装
 
-源码方式需要额外安装 Python 3.11+（含 `pythonw.exe`）。把[README 的一句话安装](../README.md#一句话安装)交给能操作本机的智能体，或下载仓库后运行：
+此入口用于开发或继续维护原有源码安装，需要 Python 3.11+（含 `pythonw.exe`）。普通桌面用户使用上方 EXE 即可。需要源码方式时下载仓库后运行：
 
 ```powershell
 git clone https://github.com/IIMovoMII/Codex-QQ.git

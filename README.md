@@ -8,7 +8,7 @@
 任务完成、出错、需要你决定时收到提醒；引用一条消息，就能回到对应对话。
 
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4)](docs/install.md)
-[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](docs/install.md)
+[![桌面应用](https://img.shields.io/badge/桌面应用-1.0.2-0078D4)](https://github.com/IIMovoMII/Codex-QQ/releases/tag/app-v1.0.2)
 [![检查](https://github.com/IIMovoMII/Codex-QQ/actions/workflows/check.yml/badge.svg)](https://github.com/IIMovoMII/Codex-QQ/actions/workflows/check.yml)
 [![配套网关](https://img.shields.io/github/v/release/IIMovoMII/Codex-QQ?filter=v%2A&label=配套网关)](https://github.com/IIMovoMII/Codex-QQ/releases)
 [![MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -81,27 +81,15 @@
 阅读 https://github.com/IIMovoMII/Codex-QQ ，按照智能体安装指南在我的电脑上部署 Codex-QQ。
 ~~~
 
-智能体会按[安装指南](docs/agent-install.md)在项目目录运行一次 `install.cmd`；向导自动检查环境、准备程序并接续中断的进度。第一次使用没有机器人时，向导会逐步告诉你到 QQ 开放平台创建、查找 AppID/AppSecret 和加入自己的测试 QQ；然后只在本机输入密钥、完成 QQ 绑定并确认钩子信任。没有本机操作能力的网页聊天只能提供同样的步骤指导。
+智能体会按[安装指南](docs/agent-install.md)获取官方发行资产、核对 SHA-256 并运行中文桌面安装器。首次使用向导会说明创建机器人、查找 AppID/AppSecret 和加入本人测试 QQ 的步骤，再由你在本机填写凭据和绑定。没有本机操作能力的网页聊天可提供同样的步骤指导。
 
 ### 手动安装
 
-源码安装支持 **Windows 10/11 x64**，需要可用的 Codex Desktop、Python 3.11+ 和自己的 QQ 官方机器人。安装向导自动下载并校验本仓库发布的配套网关。
+1. 下载上方中文 EXE 安装包，按提示安装；无需 Git、Node.js 或额外安装 Python。
+2. 从开始菜单打开“Codex QQ 助手”，按向导配置自己的机器人并通过本人 QQ 私聊绑定。AppSecret 只在本机填写。
+3. 打开 Codex，在 QQ 发“帮助”“对话”，按引用回执发送任务并核对结果。
 
-~~~powershell
-git clone https://github.com/IIMovoMII/Codex-QQ.git
-cd Codex-QQ
-.\install.cmd
-~~~
-
-没有 Git？用仓库顶部的 **Code → Download ZIP**，解压到长期保留的文件夹，双击 `install.cmd` 即可。
-
-向导会自动准备程序、启动配置连接，再提示你完成：
-
-1. 配置自己的机器人，并在 QQ 私聊中绑定自己的身份；群聊是绑定完成后的可选功能。
-2. 确认合并本程序钩子，再到 Desktop 核对并信任。
-3. 向机器人发「帮助」，检查选定对话、发送任务和结果提醒。
-
-已有绑定会保留，不会替你改模型、登录态或历史。以后双击 `bin/CodexQQ助手.exe` 开启，托盘右键退出或按需开启登录自启。详见[首次安装](docs/install.md)与[更新说明](docs/development.md#更新已有安装)。
+已有绑定和数据会保留。关闭窗口继续在托盘运行；“设置 → 通用”可开启登录自启，登录启动直接驻留托盘。详情见[首次安装](docs/install.md)。开发者或需要兼容原入口的用户仍可采用[源码安装](docs/install.md#源码安装)，迁移见[更新说明](docs/development.md#更新已有安装)。
 
 ### 第一次发任务
 

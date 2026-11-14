@@ -11,11 +11,11 @@ labels: bug
 
 ## 环境
 
-- Windows / Python / Codex Desktop 版本：
-- Codex-QQ 提交或版本：
+- Windows / 显示缩放比例 / Codex Desktop 版本：
+- Codex-QQ 应用版本（源码方式补充提交和 Python 版本）：
 - 官方账号 / 第三方 API（不填写凭据）：
 - QQ 聊天正文不可见，还是仅没有系统弹窗：
 
 ## 脱敏诊断
 
-只粘贴必要错误类型和 doctor 的非敏感状态，不上传完整配置、日志、聊天记录、OpenID 或 Token。
+优先从“帮助与诊断”复制必要的脱敏摘要；源码方式可提供 doctor 的非敏感状态。不上传完整配置、日志、聊天记录、OpenID 或 Token。
