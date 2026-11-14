@@ -10,7 +10,7 @@
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4)](docs/install.md)
 [![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](docs/install.md)
 [![检查](https://github.com/IIMovoMII/Codex-QQ/actions/workflows/check.yml/badge.svg)](https://github.com/IIMovoMII/Codex-QQ/actions/workflows/check.yml)
-[![配套网关](https://img.shields.io/github/v/release/IIMovoMII/Codex-QQ?label=配套网关)](https://github.com/IIMovoMII/Codex-QQ/releases)
+[![配套网关](https://img.shields.io/github/v/release/IIMovoMII/Codex-QQ?filter=v%2A&label=配套网关)](https://github.com/IIMovoMII/Codex-QQ/releases)
 [![MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
 [桌面应用](#桌面应用) · [一句话安装](#一句话安装) · [操作手册](docs/usage.md) · [回复与动作对照](docs/reply-action-reference.md) · [常见问题](docs/troubleshooting.md) · [参与开发](docs/development.md)
