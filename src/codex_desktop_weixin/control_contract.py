@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import re
 import struct
+import subprocess
 from functools import lru_cache
 from pathlib import Path
 
@@ -128,6 +129,38 @@ def check_app_tools_contract(process_image: str) -> None:
     # The actual server identity is matched separately before tools/list/call.
     # Native tool compatibility comes from its live inputSchema, not IPC hashes.
     _bundle_path(process_image)
+
+
+def bundled_codex_cli(process_image: str) -> Path:
+    bundle = _bundle_path(process_image)
+    executable = (bundle.parent / 'codex.exe').resolve(strict=True)
+    if executable.parent != bundle.parent or not executable.is_file():
+        raise DesktopControlError('desktop-queue-cli-unavailable')
+    return executable
+
+
+@lru_cache(maxsize=4)
+def _queue_command_available(executable: Path, size: int, modified: int) -> bool:
+    del size, modified
+    help_result = subprocess.run(
+        [str(executable), 'queue', '--help'], stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        encoding='utf-8', errors='replace', timeout=2.0,
+        creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0), check=False,
+    )
+    return help_result.returncode == 0 and all(
+        re.search(r'(?m)^\s+' + flag + r'\s+<[^>]+>', help_result.stdout)
+        for flag in ('--thread', '--message')
+    )
+
+
+def supports_queue_command(process_image: str) -> bool:
+    try:
+        cli = bundled_codex_cli(process_image)
+        stat = cli.stat()
+        return _queue_command_available(cli, stat.st_size, stat.st_mtime_ns)
+    except (OSError, ValueError, DesktopControlError, subprocess.TimeoutExpired):
+        return False
 
 
 def check_steer_contract(process_image: str) -> None:

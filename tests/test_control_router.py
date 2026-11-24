@@ -8,7 +8,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src" / "codex_desktop_weixin"))
 from control_router import ControlRouter
@@ -138,6 +138,35 @@ class ControlRouterTests(unittest.TestCase):
         self.assertIn("［乙］", card)
         self.send("你好😀", quote=card)
         self.assertEqual(self.calls, [(THREAD_B, "你好😀")])
+
+    def test_current_desktop_recovers_quote_dispatch_when_the_follower_pipe_is_gone(self):
+        from control_backend import NativeBackend
+        connection = ('verified-current', 1.0, 'desktop-image')
+        tools = Mock()
+        tools.discover.return_value = (connection, {'read_thread', 'navigate_to_codex_page'})
+        tools.thread.side_effect = [{'status': {'type': 'notLoaded'}},
+                                    {'status': {'type': 'active'}}]
+        tools.open_thread.return_value = {'state': 'confirmed'}
+        tools.read_thread.return_value = {'thread': {'id': THREAD_B, 'status': {'type': 'active'}},
+                                          'turns': [{'status': 'inProgress'}]}
+        backend = NativeBackend(pipe_factory=Mock(side_effect=FileNotFoundError), app_tools=tools)
+        self.controller.backend = backend
+        self.controller.queue_func = Mock(return_value=(
+            True, f"Queued message 00000000-0000-4000-8000-000000000009 for thread {THREAD_B}."))
+        original = self.controller._card("test|qqbot:user|user", "thread",
+                                         {"thread_id": THREAD_B}, "选择同名对话乙")
+        with (patch('native_app_tools.desktop_identities', return_value=[connection]),
+              patch('control_contract.supports_queue_command', return_value=True),
+              patch.object(backend, 'submission_status', return_value={
+                  'status': 'queued', 'payload_verified': True})):
+            request = self.request("排队核对 😀", quote=original)
+            reply = self.controller.handle(request)
+            self.controller.handle(request)
+        self.assertIn('正在排队', reply)
+        self.assertEqual(tools.open_thread.call_count, 1)
+        self.assertEqual(tools.open_thread.call_args.args[:2], (THREAD_B, connection[0]))
+        self.controller.queue_func.assert_called_once_with(
+            THREAD_B, '排队核对 😀', expected_connection=connection[0])
 
     def test_explicit_selection_opens_unloaded_chat_once_and_keeps_quote_valid(self):
         loaded = set()

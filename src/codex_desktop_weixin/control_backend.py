@@ -33,6 +33,7 @@ class NativeBackend:
         self.pipe_factory = pipe_factory
         self.contract_check = contract_check
         self.process_image: str | None = None
+        self.app_tools_connection: str | None = None
         self.app_tools = app_tools
         self.catalog = catalog
 
@@ -74,12 +75,21 @@ class NativeBackend:
         check_contract(self.process_image or '')
 
     def probe(self) -> tuple[str, float]:
-        with self.pipe_factory() as pipe:
-            client = DesktopClient(pipe)
-            client.initialize()
-            identity, created, image = pipe_server_identity(pipe)
-            self.process_image = image
-            return identity, created
+        self.app_tools_connection = None
+        try:
+            with self.pipe_factory() as pipe:
+                identity, created, image = pipe_server_identity(pipe)
+                if self.contract_check is None:
+                    from control_contract import check_contract
+                    check_contract(image)
+                DesktopClient(pipe).initialize()
+        except (OSError, TimeoutError, ValueError, DesktopControlError):
+            # New Desktop versions publish app tools without a follower pipe.
+            from native_app_tools import desktop_identities
+            (identity, created, image), _ = self.native_tools().discover(desktop_identities())
+            self.app_tools_connection = identity
+        self.process_image = image
+        return identity, created
 
     @staticmethod
     def _check_connection(pipe: Any, expected_connection: str | None) -> None:
@@ -227,10 +237,19 @@ class NativeBackend:
             },
         }
 
-    def ensure_owner(self, thread_id: str) -> None:
+    def ensure_owner(self, thread_id: str, expected_connection: str | None = None) -> None:
+        if self.app_tools_connection is not None:
+            if expected_connection and self.app_tools_connection != expected_connection:
+                raise DesktopControlError('desktop-generation-changed-during-read')
+            row = self.native_tools().thread(thread_id, self.app_tools_connection)
+            status = row.get('status')
+            if isinstance(status, dict) and status.get('type') in ('active', 'idle'):
+                return
+            raise DesktopControlError('no-client-found')
         with self.pipe_factory() as pipe:
             client = DesktopClient(pipe)
             client.initialize()
+            self._check_connection(pipe, expected_connection)
             client.owner(thread_id)
 
     def status(self, thread_id: str) -> str:
@@ -250,6 +269,15 @@ class NativeBackend:
                     return label
         except (OSError, ValueError, TypeError):
             pass
+        if self.app_tools_connection is not None:
+            try:
+                status = self.native_tools().thread(thread_id, self.app_tools_connection).get('status')
+                if isinstance(status, dict):
+                    return {'active': '运行中', 'idle': '空闲', 'notLoaded': '尚未载入'}.get(
+                        status.get('type'), '当前状态待核对')
+            except (OSError, TimeoutError, DesktopControlError, ValueError):
+                pass
+            return '未能核对目标对话状态'
         try:
             self.ensure_owner(thread_id)
         except (OSError, TimeoutError, DesktopControlError, ValueError) as error:
@@ -395,7 +423,10 @@ class NativeBackend:
                                  queue_func: Any) -> dict:
         """Append to Codex's native visible queue without replacing its snapshot."""
         try:
-            accepted, detail = queue_func(thread_id, text)
+            if self.app_tools_connection == connection:
+                accepted, detail = queue_func(thread_id, text, expected_connection=connection)
+            else:
+                accepted, detail = queue_func(thread_id, text)
         except TimeoutError:
             return {'state': 'unknown', 'reply':
                     'Codex 队列命令超时，消息可能已经排队；结果未确认，助手不会重发。'
@@ -420,6 +451,33 @@ class NativeBackend:
                     '助手不会重发。请先检查目标对话的可见待发送列表和最近消息。'}
         return {'state': 'confirmed', 'mode': 'queued', 'queue_id': queue_id,
                 'detail': detail}
+
+    def _submit_via_app_tools(self, thread_id: str, text: str, connection: str,
+                              queue_func: Any) -> dict:
+        from control_contract import supports_queue_command
+        from native_app_tools import LOCAL_THREAD_ID
+
+        if not LOCAL_THREAD_ID.fullmatch(thread_id):
+            return {'state': 'rejected', 'reply': '当前 Codex 队列要求本机对话编号。请重新选择要发送的对话。'}
+        if not supports_queue_command(self.process_image or ''):
+            return {'state': 'rejected', 'reply': '当前 Codex 未提供本机队列命令。这条消息未提交。'}
+        native = self.native_tools().read_thread(thread_id, connection)
+        status = native['thread'].get('status')
+        turns = native.get('turns')
+        runtime = status.get('type') if isinstance(status, dict) else None
+        turn = turns[0] if isinstance(turns, list) and len(turns) == 1 else None
+        latest = turn.get('status') if isinstance(turn, dict) else None
+        if runtime == 'idle' and latest == 'interrupted':
+            return {'state': 'rejected', 'reply': '该对话已暂停。当前 Codex 版本需要在电脑上开始下一轮。'}
+        busy = runtime == 'active' and latest == 'inProgress'
+        idle = runtime == 'idle' and (turns == [] or latest in ('completed', 'failed'))
+        if not (busy or idle):
+            return {'state': 'rejected', 'reply': '本机 Codex 尚未确认对话已载入并处于运行或空闲状态。这条消息未提交。'}
+
+        # The server admits queued input only when the thread is idle. This
+        # also handles a turn starting on the desktop during our preflight.
+        # The CLI response confirms admission, not that the model has begun.
+        return self.enqueue_native_follow_up(thread_id, text, connection, queue_func)
 
     def _submission_state(self, thread_id: str, connection: str) -> dict:
         """Read a submission boundary, waiting only for transient hydration.
@@ -486,6 +544,8 @@ class NativeBackend:
                 raise ValueError('invalid-message')
         except (ValueError, UnicodeError, TypeError):
             return {'state': 'rejected', 'reply': '消息或编号格式无效，未发送；请重新输入原文。'}
+        if self.app_tools_connection == connection:
+            return self._submit_via_app_tools(thread_id, text, connection, queue_func)
         before = self._submission_state(thread_id, connection)
         if (before.get('snapshot_complete') is False
                 and not before.get('bounded_idle_safe')
@@ -772,6 +832,10 @@ class NativeBackend:
             identity, _ = self.probe()
             if identity != connection or receipt['connection'] != connection:
                 raise DesktopControlError('receipt-connection-changed')
+            if self.app_tools_connection == connection:
+                # The app-tool projection omits the client message identity.
+                return observed_status(receipt, catalog.queue_path,
+                                       lambda _: {'snapshot_complete': False})
             if self.contract_check is None:
                 from control_contract import check_queue_contract
                 check_queue_contract(self.process_image or '')
@@ -784,6 +848,8 @@ class NativeBackend:
 
     def remove_submission(self, receipt: dict, catalog: Any, connection: str) -> dict:
         """Native single-item removal, never a database deletion or delete-then-steer."""
+        if self.app_tools_connection == connection:
+            return {'state': 'rejected', 'reply': '请在电脑上通过 Codex 待发送列表移除这条消息。'}
         from submission_receipts import read_queued_item, digest
         status = self.submission_status(receipt, catalog, connection)
         if status['status'] == 'entered':

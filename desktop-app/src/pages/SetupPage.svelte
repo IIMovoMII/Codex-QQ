@@ -117,7 +117,7 @@
         <div class="phase-row"><Icon name="monitor"/><span>Windows 桌面应用</span><Pill tone="info">独立运行</Pill></div>
         <div class="phase-row"><Icon name="shield"/><span>内置运行环境与已校验网关</span><Pill tone="info">随安装提供</Pill></div>
         <div class="phase-row"><Icon name="lock"/><span>保留 Codex 账号、模型与历史</span></div>
-        <div class="phase-row"><Icon name="code"/><span>Codex 本机连接</span><Pill tone={app.snapshot.codex === 'ready' ? 'success' : 'warning'}>{app.snapshot.codex === 'ready' ? '已连接' : '尚未就绪，可先配置 QQ'}</Pill></div>
+        <div class="phase-row"><Icon name="code"/><span>Codex 本机连接</span><Pill tone={app.snapshot.codex === 'ready' ? 'success' : 'warning'}>{app.snapshot.codex === 'ready' ? '已连接' : app.snapshot.codex === 'limited' ? '已连接 · 控制受限' : '尚未就绪，可先配置 QQ'}</Pill></div>
       </div>
     {:else if step === 1}
       <h1 class="setup-title">准备你的 QQ 机器人</h1>

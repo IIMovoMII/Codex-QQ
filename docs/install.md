@@ -1,6 +1,6 @@
 # 首次安装
 
-新版是独立 Windows 桌面应用，提供中文安装器和图形配置向导。[下载 1.0.2 中文安装包](https://github.com/IIMovoMII/Codex-QQ/releases/download/app-v1.0.2/CodexQQ-Setup-1.0.2-windows-x64.exe)。已有源码安装可继续使用本文末尾的入口；现用 QQ 绑定和运行数据保留。
+Codex QQ 助手提供中文安装器和图形配置向导。已有源码安装可继续使用本文末尾的入口。[下载 1.0.3 中文安装包](https://github.com/IIMovoMII/Codex-QQ/releases/download/app-v1.0.3/CodexQQ-Setup-1.0.3-windows-x64.exe)
 
 ## 准备
 
@@ -13,7 +13,9 @@
 
 ## 中文桌面安装器
 
-从[GitHub 发行页面](https://github.com/IIMovoMII/Codex-QQ/releases/tag/app-v1.0.2)下载 `CodexQQ-Setup-1.0.2-windows-x64.exe`。同页提供 `SHA256SUMS.txt`、更新签名、许可证和发布说明；可用 `Get-FileHash .\CodexQQ-Setup-1.0.2-windows-x64.exe -Algorithm SHA256` 与清单核对。Windows Authenticode 代码签名与应用更新签名不同，本版未配置前者。
+下载 `CodexQQ-Setup-1.0.3-windows-x64.exe` 后，可用 `Get-FileHash .\CodexQQ-Setup-1.0.3-windows-x64.exe -Algorithm SHA256` 与 `SHA256SUMS.txt` 核对。同页提供应用更新签名、许可证和发行说明。[GitHub 发行页面](https://github.com/IIMovoMII/Codex-QQ/releases/tag/app-v1.0.3)
+
+1.0.2 及更早版本请退出托盘里的 QQ 助手，然后运行新版 EXE 覆盖安装。QQ 绑定和运行数据会保留。1.0.3 使用新更新签名，以后的版本可在应用的「更新」页安装。
 
 运行安装器，按中文提示安装到当前用户目录。默认程序路径为 `%LOCALAPPDATA%\Programs\CodexQQ`；日常使用开始菜单中的“Codex QQ 助手”。程序目录内的运行组件需完整保留。
 

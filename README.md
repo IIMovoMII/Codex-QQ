@@ -8,7 +8,7 @@
 任务完成、出错、需要你决定时收到提醒；引用一条消息，就能回到对应对话。
 
 [![Windows](https://img.shields.io/badge/Windows-10%20%2F%2011-0078D4)](docs/install.md)
-[![桌面应用](https://img.shields.io/badge/桌面应用-1.0.2-0078D4)](https://github.com/IIMovoMII/Codex-QQ/releases/tag/app-v1.0.2)
+[![桌面应用](https://img.shields.io/badge/桌面应用-1.0.3-0078D4)](https://github.com/IIMovoMII/Codex-QQ/releases/tag/app-v1.0.3)
 [![检查](https://github.com/IIMovoMII/Codex-QQ/actions/workflows/check.yml/badge.svg)](https://github.com/IIMovoMII/Codex-QQ/actions/workflows/check.yml)
 [![配套网关](https://img.shields.io/github/v/release/IIMovoMII/Codex-QQ?filter=v%2A&label=配套网关)](https://github.com/IIMovoMII/Codex-QQ/releases)
 [![MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -42,9 +42,9 @@
 | --- | --- |
 | 知道任务做完、报错或需要处理了 | 接收完成、错误、暂停、问题和审批提醒 |
 | 接着安排工作 | 引用提醒或对话回执，直接发送正文或「继续」 |
-| 让它停一下，或者改个方向 | 引用发送「暂停」或「引导 先检查登录问题」 |
+| 让它停一下，或者改个方向 | 使用旧控制接口的 Codex 支持在 QQ 发送「暂停」或「引导」，新版 Codex 在电脑操作 |
 | 在多个项目、聊天之间切换 | 发「项目」「对话」「搜索 关键词」，引用列表回复序号 |
-| 管理待发送消息 | 引用目标发「队列」，选中条目后可删除，或将原文转为当前任务的引导 |
+| 查看待发送消息 | 引用目标发「队列」。删除或转为引导在新版 Codex 的电脑端操作 |
 | 调整模型、思考档位与权限 | 引用发「设置」「模型」「思考档位」「权限」 |
 | 从手机开个新任务 | 引用发「新建对话 标题」，选项目、写任务、确认后执行 |
 | 管理当前聊天 | 改名、从最近完成位置分支、空闲时压缩上下文 |
@@ -71,7 +71,7 @@
 
 新版提供中文安装器、首次配置向导、状态概览、QQ 与 Codex 连接、通知记录、设置、更新及诊断页面。安装包内置 Python 和配套网关，使用 Windows WebView2；日常运行无需 Node、开发服务器或单独安装 Python。
 
-[下载 1.0.2 中文安装包](https://github.com/IIMovoMII/Codex-QQ/releases/download/app-v1.0.2/CodexQQ-Setup-1.0.2-windows-x64.exe)，或查看[发行说明与校验文件](https://github.com/IIMovoMII/Codex-QQ/releases/tag/app-v1.0.2)。安装与首次使用流程见[首次安装](docs/install.md)，构建与验收见[桌面开发说明](desktop-app/README.md)。已有用户升级保留原绑定和数据；源码安装入口也继续提供。
+1.0.2 及更早版本请下载新版 EXE 覆盖安装一次。升级保留原绑定和数据，后续版本可在应用内更新。[下载 1.0.3 中文安装包](https://github.com/IIMovoMII/Codex-QQ/releases/download/app-v1.0.3/CodexQQ-Setup-1.0.3-windows-x64.exe) · [发行说明与校验文件](https://github.com/IIMovoMII/Codex-QQ/releases/tag/app-v1.0.3) · [安装指南](docs/install.md) · [桌面开发说明](desktop-app/README.md)
 
 ### 一句话安装
 

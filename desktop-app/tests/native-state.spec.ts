@@ -127,6 +127,38 @@ test('failed native connection refresh removes stale readiness and retains confi
   await expect(page.getByText('•••• TST9', { exact: false })).toBeVisible();
 });
 
+test('current Codex tools show a connection while quote control and queuing remain unavailable', async ({ page }) => {
+  await page.addInitScript(() => {
+    const snapshot = { revision: 1, observedAt: new Date().toISOString(), runtime: 'ready', codex: 'limited',
+      qq: 'ready', configured: true, appId: '987654321', identity: '•••• TST9', sandbox: true,
+      hooks: 'ready', startup: false, startupVerified: false, receivedByUser: false };
+    (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
+      transformCallback: () => 1,
+      invoke: async (command: string, args: { request?: { command?: string; requestId?: string } }) => {
+        if (command === 'app_snapshot') return { snapshot, preferences: { version: 1, checkUpdates: false } };
+        if (command.startsWith('plugin:event|')) return 1;
+        const request = args?.request;
+        const data = request?.command === 'get_setup_state' ? { setup: { phase: 'configured', step: 8, ready: true } }
+          : request?.command === 'list_notifications' ? { deliveries: [], total: 0 }
+          : request?.command === 'check_connections' ? { snapshot: { ...snapshot, revision: 2, codex: 'ready' } }
+          : null;
+        if (data) return { status: 'confirmed', preview: false, operationId: request?.requestId, data };
+        throw new Error('unavailable');
+      },
+    };
+  });
+  await page.goto('/');
+  await expect(page.getByRole('heading', { name: 'Codex 控制受限', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '查看连接', exact: true }).click();
+  const connection = page.getByRole('region', { name: 'Codex 与助手连接路径' });
+  await expect(connection.getByText('运行中', { exact: true })).toBeVisible();
+  await expect(connection.getByText('已连接 · 控制受限', { exact: true })).toBeVisible();
+  await expect(page.getByText('暂不可用', { exact: true })).toHaveCount(2);
+  await page.getByRole('button', { name: '重新检查', exact: true }).click();
+  await expect(connection.getByText('可用', { exact: true })).toBeVisible();
+  await expect(page.getByText('暂不可用', { exact: true })).toHaveCount(0);
+});
+
 for (const known of [true, false]) {
   test(`native update check preserves ${known ? 'definite failure' : 'uncertain result'} without automatic retry`, async ({ page }) => {
     await page.addInitScript(({ known }) => {

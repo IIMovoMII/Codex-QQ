@@ -15,7 +15,7 @@ def can_update(data: Path, codex_home: Path, journal) -> dict:
         return {'allowed': True, 'reason': 'desktop_closed'}
     from control_catalog import LocalCatalog
     from control_backend import NativeBackend
-    from desktop_control import WindowsDesktopPipe
+    from desktop_control import DesktopControlError, WindowsDesktopPipe
     try:
         catalog = LocalCatalog(codex_home)
         rows = catalog._query("SELECT id FROM threads WHERE archived=0 AND agent_role IS NULL ORDER BY updated_at_ms DESC LIMIT 201")
@@ -35,6 +35,6 @@ def can_update(data: Path, codex_home: Path, journal) -> dict:
                 return {'allowed': False, 'reason': 'task_active_or_unknown'}
             if catalog.saved_queue(row['id']):
                 return {'allowed': False, 'reason': 'task_queued'}
-    except (OSError, ValueError, RuntimeError, KeyError):
+    except (OSError, ValueError, RuntimeError, KeyError, DesktopControlError):
         return {'allowed': False, 'reason': 'task_state_unknown'}
     return {'allowed': True, 'reason': 'idle'}

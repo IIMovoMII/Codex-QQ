@@ -210,7 +210,7 @@ def status_text(value: dict) -> str:
     if reason == 'desktop-history-read-failed':
         return '该消息不在本地可读队列中，且 Desktop 历史读取失败；不能确认它已开始、已删除还是仍由 Desktop 持有。不会重发。请在目标对话核对。'
     if reason == 'desktop-history-summary-incomplete':
-        return '该消息不在本地可读队列中；Desktop 只返回最近一轮摘要，未提供包含这条消息身份的完整历史。无法据此判断已执行还是已删除，不会重发；请在目标对话查看原文。'
+        return '该编号已离开本地可读队列，当前接口无法核对它对应的轮次。请在目标对话查看这条消息的处理结果。'
     if reason == 'queue-row-not-found':
         return '没有在本地可读队列中找到这条消息，也没有匹配到已接受的 turn ID；它可能已开始、已被电脑删除或已移出队列。不会重发，请查看目标对话。'
     if reason == 'absent-from-queue-and-no-accepted-turn':

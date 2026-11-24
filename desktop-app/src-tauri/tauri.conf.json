@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Codex QQ 助手",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "identifier": "com.codexqq.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -74,10 +74,10 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEEzMThGOTBFMkMwNzg3QTUKUldTbGh3Y3NEdmtZbzJwRkxLZlNXdmhvWHIxL3RHTkpFUnV4NUpWOWNuVS9hQWpVZi9aM1FFT04K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEFGMDU1QkY1MDRBODgwOTIKUldTU2dLZ0U5VnNGcjJyVE9LZlB6RkJzb0FqTDhCUGJEeTlrZ0xmN0l0dmQ4UlRYMkx0ei9WTU8K",
       "requireSignedVersion": true,
       "endpoints": [
-        "https://raw.githubusercontent.com/IIMovoMII/Codex-QQ/main/desktop-app/update-channel.json"
+        "https://raw.githubusercontent.com/IIMovoMII/Codex-QQ/main/desktop-app/update-channel-v2.json"
       ],
       "windows": {
         "installMode": "passive"

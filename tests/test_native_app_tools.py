@@ -11,6 +11,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'src' / 'codex_desktop_weixin'))
 from desktop_control import DesktopControlError
+from desktop_status import codex_connection_status
 from native_app_tools import NativeAppTools
 
 THREAD = '01a10000-0000-7000-8000-000000000001'
@@ -128,6 +129,43 @@ class NativeToolTests(unittest.TestCase):
             self.assertEqual(message['params']['threadId'], THREAD)
             self.assertTrue(message['params']['turnId'].startswith('qq-control-context-'))
             self.assertEqual(message['params']['arguments']['maxOutputCharsPerItem'], 0)
+
+    def test_connection_status_distinguishes_current_app_tools_from_control_ipc(self):
+        self.native.endpoint = CURRENT_ENDPOINT
+        identity = ('desktop-one', 1.0, 'trusted-app')
+        with (patch('desktop_status.codex_desktop_root_pids', return_value={123}),
+              patch('desktop_status.desktop_identities', return_value=[identity]),
+              patch('desktop_status.WindowsDesktopPipe', side_effect=FileNotFoundError),
+              patch('desktop_status.supports_queue_command', return_value=False) as queue_supported):
+            self.assertEqual(codex_connection_status(self.native), 'limited')
+            self.assertEqual([row['method'] for row in self.service.writes], ['tools/list'])
+            queue_supported.return_value = True
+            self.assertEqual(codex_connection_status(self.native), 'ready')
+            self.service.names.remove('navigate_to_codex_page')
+            self.assertEqual(codex_connection_status(self.native), 'limited')
+            self.service.names.remove('read_thread')
+            self.assertEqual(codex_connection_status(self.native), 'unknown')
+            self.service.identity = 'different-process'
+            self.service.writes.clear()
+            self.assertEqual(codex_connection_status(self.native), 'unknown')
+            self.assertEqual(self.service.writes, [])
+
+    def test_connection_status_reports_ready_for_verified_control_ipc(self):
+        identity = ('desktop-one', 1.0, 'trusted-app')
+        with (patch('desktop_status.codex_desktop_root_pids', return_value={123}),
+              patch('desktop_status.desktop_identities', return_value=[identity]),
+              patch('desktop_status.WindowsDesktopPipe'),
+              patch('desktop_status.supports_queue_command', return_value=False),
+              patch('desktop_status.DesktopClient') as client,
+              patch('desktop_status.pipe_server_identity', return_value=identity) as owner,
+              patch('desktop_status.check_contract') as contract):
+            self.assertEqual(codex_connection_status(self.native), 'ready')
+            client.return_value.initialize.assert_called_once_with()
+            contract.assert_called_once_with('trusted-app')
+            self.assertEqual(self.service.writes, [])
+            owner.return_value = ('unrelated', 1.0, 'different-app')
+            self.assertEqual(codex_connection_status(self.native), 'limited')
+            client.return_value.initialize.assert_called_once_with()
 
     def test_wrong_process_and_contract_block_before_tool_dispatch(self):
         self.assertEqual(self.native.rename(THREAD, '新标题', 'other-process', 'op1')['state'], 'rejected')

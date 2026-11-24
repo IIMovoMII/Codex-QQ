@@ -95,8 +95,8 @@ class ReceiptTests(QueueBase, unittest.TestCase):
         result = observed_status(receipt(client_id=CLIENT), self.path, lambda _: {
             'snapshot_complete': False, 'accepted_submissions': []})
         self.assertEqual(result['reason'], 'desktop-history-summary-incomplete')
-        self.assertIn('只返回最近一轮摘要', status_text(result))
-        self.assertIn('不会重发', status_text(result))
+        self.assertIn('当前接口无法核对它对应的轮次', status_text(result))
+        self.assertIn('请在目标对话查看', status_text(result))
 
     def test_snake_case_is_explicit_and_mixed_aliases_reject(self):
         payload = {'client_user_message_id': CLIENT, 'input': [{'type': 'text', 'text': TEXT}]}

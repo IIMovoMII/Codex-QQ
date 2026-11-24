@@ -9,7 +9,7 @@
 | 范围 | 必须保留的行为 | 入口 |
 | --- | --- | --- |
 | 引用与身份 | 每条消息独立解析可信引用；长期卡片按稳定 thread ID 核对 owner，目录暂缺不能按标题猜。新引用带 QQ scope；纯旧 ID 只兼容已核实的同一用户私聊，群聊/未知拒绝。分卷编号仅凭本机证据映射；保留原始消息时间与去重 | `control_router.py`、`qq_desktop_bridge.py` |
-| 普通发送与队列 | 空闲/暂停经 owner 开始轮次；忙时用 `codex queue --thread … --message …`，唯一匹配 thread/queue ID 才算成功；禁止整份队列快照替换。恢复窗口有界重读，未知提交不重发。队列引导的删除与引导非原子事务，分别处理未知 | `control_backend.py`、`submission_receipts.py` |
+| 普通发送与队列 | 旧连接空闲/暂停经 owner 开始轮次，忙时走原生队列。新版用本机工具校验引用的对话，由配套 `codex queue` 受理正文，Codex 在对话空闲时取出并开始一轮。暂停续接和队列管理在电脑完成。按 thread/queue ID 核对回执，提交状态不明时禁止补发 | `control_backend.py`、`submission_receipts.py` |
 | 超大状态 | 有界排空 follower 广播，按需 `read_thread` 读最近一轮；仅 idle、已结束、resumed、无活动标记且 owner/连接复核一致才允许开始。明确忙时可追加队列。答复/权限/分支/压缩缺少必需字段就拒绝，指出缺项与是否已调用，不伪造空列表/默认值 | `desktop_control.py`、`control_backend.py` |
 | 原生能力 | 接受当前 `codex-app-tools-*` 与旧工具名；按实际进程与参数核验，缓存绑定进程身份。发现限候选与总时长，仅明确调用时进行；先验服务进程再列工具，写前再验。非法显式端点不回退；调用开始后不换端点重发 | `native_app_tools.py`、`control_contract.py` |
 | 状态与通知 | 原生事件先于迟到钩子，Stop 不单独等于完成；只跳过目标轮次前历史，成功归并后提交游标。坏时间戳跳过并标记不完整，不能用当前时间补。通知事实进账本，索引有界且损坏可隔离恢复；dead-letter 终态不复活。清理不碰 pending、活动任务和 Codex 文件 | `monitor.py`、`tailer.py`、`state_machine.py`、`notifier.py` |

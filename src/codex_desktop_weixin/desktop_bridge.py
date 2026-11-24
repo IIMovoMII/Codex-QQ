@@ -32,6 +32,7 @@ from desktop_migration import (MigrationError, legacy_launcher_path,
 from ui_operations import OperationJournal, OperationConflict
 from setup_service import SetupService
 from desktop_status import codex_connection_status, qq_connection_status
+from native_app_tools import NativeAppTools
 from desktop_views import notifications, logs
 from configuration_service import ConfigurationService, selected, digest
 from desktop_startup import StartupService
@@ -100,7 +101,8 @@ class DesktopBridge:
         self._replies: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self.operations = OperationJournal(self.data_dir / "state/ui-operations.sqlite3")
         self.preference_path = self.data_dir / "ui-preferences.json"
-        self._codex_observed = 0.0
+        self._app_tools = NativeAppTools(hint_path=self.data_dir / 'state/native-app-tools.json')
+        self._codex_observed = float('-inf')
         self._codex_status = "unknown"
         self._auto_start = False
         self.packaged, self.gateway_path, self.python_path, self.backend_path = self._package_paths()
@@ -273,7 +275,8 @@ class DesktopBridge:
                         self._start_runtime()
                     except BridgeError:
                         pass
-            return {"snapshot": self.snapshot(), "preferences": self.preferences()}
+            return {"snapshot": self.snapshot(refresh_codex=command == "check_connections"),
+                    "preferences": self.preferences()}
         if command == "list_notifications":
             return notifications(self.data_dir, offset=params.get("offset", 0), limit=params.get("limit", 200))
         if command == "list_logs":
@@ -546,7 +549,7 @@ class DesktopBridge:
 
     def _checks(self) -> dict[str, Any]:
         hooks = hook_install_status(self.codex_home)
-        snapshot = self.snapshot()
+        snapshot = self.snapshot(refresh_codex=True)
         return {
             "snapshot": snapshot,
             "checks": {
@@ -558,15 +561,15 @@ class DesktopBridge:
             },
         }
 
-    def snapshot(self) -> dict[str, Any]:
-        observed = datetime.fromtimestamp(self.now(), timezone.utc).astimezone().isoformat(timespec="seconds")
+    def snapshot(self, *, refresh_codex: bool = False) -> dict[str, Any]:
         try:
-            if time.monotonic() - self._codex_observed > 10:
-                self._codex_status = codex_connection_status()
+            if refresh_codex or time.monotonic() - self._codex_observed > 10:
+                self._codex_status = codex_connection_status(self._app_tools)
                 self._codex_observed = time.monotonic()
             codex_state = self._codex_status
         except (OSError, RuntimeError):
             codex_state = "unknown"
+        observed = datetime.fromtimestamp(self.now(), timezone.utc).astimezone().isoformat(timespec="seconds")
 
         monitor_pid = read_monitor_pid(self.data_dir, require_ready=True)
         app_state: dict[str, Any] = {}

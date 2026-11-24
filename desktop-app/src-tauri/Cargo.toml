@@ -1,6 +1,6 @@
 [package]
 name = "codex-qq-desktop"
-version = "1.0.2"
+version = "1.0.3"
 description = "Codex QQ 助手桌面应用"
 authors = ["Codex QQ"]
 edition = "2021"

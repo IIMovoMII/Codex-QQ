@@ -136,8 +136,9 @@ class ActionCommands:
             return self.r._card(self.scope, 'thread', {'thread_id': thread_id, 'connection': self.connection},
                                 prefix + '\n' + result['reply']), result['state']
         if command == '队列':
-            self.r.backend.require_extended_contract()
-            self.r.backend.ensure_owner(thread_id)
+            if getattr(self.r.backend, 'app_tools_connection', None) != self.connection:
+                self.r.backend.require_extended_contract()
+            self._backend_call('ensure_owner', thread_id, connection=self.connection)
             entries = self.r.catalog.saved_queue(thread_id)
             if not entries:
                 return '本机可见的排队记录为空。无法完整查询远端服务端队列，不能据此认定所有队列都为空。', 'confirmed'
@@ -266,8 +267,11 @@ class ActionCommands:
                 from submission_receipts import status_text
                 observed = self.r.backend.submission_status(data, self.r.catalog, self.connection)
                 updated = {**data, 'client_id': observed.get('client_id')}
+                remove_hint = ('可在电脑的 Codex 待发送列表移除这一条。'
+                               if getattr(self.r.backend, 'app_tools_connection', None) == self.connection
+                               else '或回复“删除”移除本条排队消息。')
                 return self.card('submission', updated, status_text(observed)
-                                 + '\n引用回复“状态”继续查看本条，或“删除”移除本条排队消息。'
+                                 + '\n引用回复“状态”继续查看本条。' + remove_hint
                                  + '\n引用回复“对话”取得普通对话回执；此卡片不发送正文或转引导。', ttl=30 * 86400), 'confirmed'
             if text == '删除':
                 key = 'submission-delete:' + data['connection'] + ':' + thread_id + ':' + data['queue_id'] + ':' + data['text_digest']
@@ -287,10 +291,13 @@ class ActionCommands:
                 return '请引用这份列表回复其中一个序号。', 'rejected'
             entry = data['entries'][index]
             if kind == 'queue_list':
+                controls = ('可在电脑的 Codex 待发送列表管理这条消息。'
+                            if getattr(self.r.backend, 'app_tools_connection', None) == self.connection
+                            else '回复“引导”会先删除这条排队消息，再把相同正文引导给当前运行任务。回复“删除”只移除它。')
                 return self.card('queued', {'thread_id': thread_id, 'entry': entry,
                                             'connection': self.connection,
                                             'operation_id': uuid.uuid4().hex},
-                                 f"待发送记录：{entry['summary']}\n状态：{self.queue_status(entry['status'])}\n回复“引导”会先删除这条排队消息，再把相同正文引导给当前运行任务；回复“删除”只移除它。"), 'confirmed'
+                                 f"待发送记录：{entry['summary']}\n状态：{self.queue_status(entry['status'])}\n{controls}"), 'confirmed'
             if entry.get('kind') == 'async_question':
                 state = self._backend_call('control_state', thread_id, connection=self.connection)
                 if state.get('owner_id') != entry.get('owner_id'):
@@ -312,6 +319,8 @@ class ActionCommands:
                 return self.r._thread_card(self.scope, row, connection=self.connection), 'confirmed'
             if text in ('队列', '状态'):
                 return self.command(thread_id, '队列', '')
+            if getattr(self.r.backend, 'app_tools_connection', None) == self.connection:
+                return '请在电脑的 Codex 待发送列表管理这条消息。', 'rejected'
             if text == '删除':
                 return self._once('queue-delete:' + thread_id + ':' + entry['id'] + ':' + entry['digest'],
                                   lambda: self._backend_call('remove_saved_queue_item', thread_id, entry, self.r.catalog,

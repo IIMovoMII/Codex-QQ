@@ -7,19 +7,22 @@
   import Pill from '../components/Pill.svelte';
   let { onconfirm, onopen }: { onconfirm: (kind: string) => void; onopen: (page: 'help' | 'settings') => void } = $props();
   let details = $state(false);
-  const desktopReady = $derived(app.snapshot.codex === 'ready');
+  const controlReady = $derived(app.snapshot.codex === 'ready');
+  const limited = $derived(app.snapshot.codex === 'limited');
+  const running = $derived(controlReady || limited);
   const unknown = $derived(app.snapshot.codex === 'unknown');
+  const controlUnavailable = $derived(limited ? '暂不可用' : unknown ? '待检查' : '等待 Codex');
 </script>
 
 <div class="page">
   <PageHeader title="Codex 连接" subtitle="连接状态仅反映最近一次本机核对">
-    {#if desktopReady}<Button variant="secondary" icon="refresh" onclick={() => app.refresh()} loading={app.pending.includes('check_connections')}>重新检查</Button>{:else}<Button variant="primary" icon="monitor" onclick={() => void app.run('open_codex')}>打开 Codex</Button>{/if}
+    {#if running}<Button variant="secondary" icon="refresh" onclick={() => app.refresh()} loading={app.pending.includes('check_connections')}>重新检查</Button>{:else}<Button variant="primary" icon="monitor" onclick={() => void app.run('open_codex')}>打开 Codex</Button>{/if}
   </PageHeader>
 
   <section class="flow-panel surface" aria-label="Codex 与助手连接路径">
-    <div class="flow-node"><span class="flow-icon"><Icon name="monitor" size={21}/></span><div><strong>Codex Desktop</strong><Pill tone={desktopReady ? 'success' : unknown ? 'warning' : 'neutral'}>{desktopReady ? '运行中' : unknown ? '待核对' : '未运行'}</Pill></div></div>
+    <div class="flow-node"><span class="flow-icon"><Icon name="monitor" size={21}/></span><div><strong>Codex Desktop</strong><Pill tone={running ? 'success' : unknown ? 'warning' : 'neutral'}>{running ? '运行中' : unknown ? '待核对' : '未运行'}</Pill></div></div>
     <Icon name="right" class="flow-link" size={20}/>
-    <div class="flow-node"><span class="flow-icon"><Icon name="code" size={21}/></span><div><strong>本机连接</strong><Pill tone={desktopReady ? 'success' : 'warning'}>{desktopReady ? '可用' : '待检查'}</Pill></div></div>
+    <div class="flow-node"><span class="flow-icon"><Icon name="code" size={21}/></span><div><strong>本机连接</strong><Pill tone={controlReady ? 'success' : 'warning'}>{controlReady ? '可用' : limited ? '已连接 · 控制受限' : unknown ? '待检查' : '未连接'}</Pill></div></div>
     <Icon name="right" class="flow-link" size={20}/>
     <div class="flow-node"><span class="flow-icon"><Icon name="bell" size={21}/></span><div><strong>QQ 助手</strong><Pill tone={app.snapshot.runtime === 'ready' ? 'success' : 'warning'}>{app.snapshot.runtime === 'ready' ? '已连接' : '待处理'}</Pill></div></div>
   </section>
@@ -28,9 +31,9 @@
     <div class="section-heading"><h2>连接能力</h2><button class="text-button" aria-expanded={details} onclick={() => details = !details}>{details ? '收起详情' : '查看能力详情'} <Icon name={details ? 'down' : 'right'} size={16}/></button></div>
     <div class="surface capability-list">
       <div class="capability"><span class="settings-icon"><Icon name="bell" size={17}/></span><div><strong>任务提醒</strong><p class="muted small">Codex 的本地任务状态经助手转为 QQ 通知。</p></div><Pill tone={app.snapshot.runtime === 'ready' ? 'success' : 'warning'}>{app.snapshot.runtime === 'ready' ? '运行中' : '待核对'}</Pill></div>
-      <div class="capability"><span class="settings-icon"><Icon name="link" size={17}/></span><div><strong>引用控制</strong><p class="muted small">每次操作按当前 QQ 消息的引用确定对话。</p></div><Pill tone={desktopReady ? 'success' : 'neutral'}>{desktopReady ? '可用' : '等待 Codex'}</Pill></div>
-      <div class="capability"><span class="settings-icon"><Icon name="list" size={17}/></span><div><strong>运行中排队</strong><p class="muted small">正文进入 Codex 原生可见队列。</p></div><Pill tone={desktopReady ? 'success' : 'neutral'}>{desktopReady ? '已支持' : '等待 Codex'}</Pill></div>
-      {#if details}<div class="capability-detail"><span><strong>状态来源</strong><small>本机 Desktop 连接检查 · {observedTime(app.snapshot.observedAt, true)}</small></span><span><strong>检查范围</strong><small>Desktop 进程、连接所有者和当前能力契约</small></span><span><strong>最近状态</strong><small>{unknown ? '未知；保留上次观测，操作前重新检查。' : desktopReady ? '连接已核对，异步问题仍在电脑处理。' : '当前未发现可用的 Desktop 连接。'}</small></span></div>{/if}
+      <div class="capability"><span class="settings-icon"><Icon name="link" size={17}/></span><div><strong>引用控制</strong><p class="muted small">每次操作按当前 QQ 消息的引用确定对话。</p></div><Pill tone={controlReady ? 'success' : limited ? 'warning' : 'neutral'}>{controlReady ? '可用' : controlUnavailable}</Pill></div>
+      <div class="capability"><span class="settings-icon"><Icon name="list" size={17}/></span><div><strong>运行中排队</strong><p class="muted small">正文进入 Codex 原生可见队列。</p></div><Pill tone={controlReady ? 'success' : limited ? 'warning' : 'neutral'}>{controlReady ? '已支持' : controlUnavailable}</Pill></div>
+      {#if details}<div class="capability-detail"><span><strong>状态来源</strong><small>本机 Desktop 连接检查 · {observedTime(app.snapshot.observedAt, true)}</small></span><span><strong>检查范围</strong><small>Desktop 进程、本机工具和控制接口</small></span><span><strong>最近状态</strong><small>{controlReady ? '连接已核对，异步问题仍在电脑处理。' : limited ? '本机工具已连接，引用控制所需的接口当前不可用。' : '当前未发现可用的 Desktop 连接。'}</small></span></div>{/if}
     </div>
   </section>
 

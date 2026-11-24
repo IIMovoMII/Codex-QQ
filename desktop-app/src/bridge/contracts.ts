@@ -17,7 +17,7 @@ export interface Snapshot {
   revision: number;
   observedAt: string;
   runtime: 'ready' | 'stopped' | 'unknown';
-  codex: 'ready' | 'offline' | 'unknown';
+  codex: 'ready' | 'limited' | 'offline' | 'unknown';
   qq: 'ready' | 'offline' | 'unknown';
   qqApi?: string;
   configured: boolean;

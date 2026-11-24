@@ -1,19 +1,41 @@
 """Read-only component evidence, distinct from process and local API health."""
 from __future__ import annotations
 from pathlib import Path
-import time
 
-def codex_connection_status():
-    from process_watch import get_codex_desktop_process_status
-    from control_backend import NativeBackend
-    from desktop_control import WindowsDesktopPipe
-    if not get_codex_desktop_process_status().desktop_alive:
-        return "offline"
+from control_contract import check_contract, supports_queue_command
+from desktop_control import (DesktopClient, DesktopControlError, WindowsDesktopPipe,
+                             pipe_server_identity)
+from native_app_tools import NativeAppTools, desktop_identities
+from process_watch import codex_desktop_root_pids
+
+
+def codex_connection_status(app_tools: NativeAppTools) -> str:
+    pids = codex_desktop_root_pids()
+    if not pids:
+        return 'offline'
+
+    processes = desktop_identities(pids)
+    if not processes:
+        return 'unknown'
+
     try:
-        NativeBackend(pipe_factory=lambda: WindowsDesktopPipe(timeout_seconds=2)).probe()
-        return "ready"
-    except (OSError, RuntimeError, ValueError, TimeoutError):
-        return "unknown"
+        with WindowsDesktopPipe(timeout_seconds=2) as pipe:
+            identity, _, image = pipe_server_identity(pipe)
+            if any(identity == process[0] for process in processes):
+                DesktopClient(pipe).initialize()
+                check_contract(image)
+                return 'ready'
+    except (OSError, TimeoutError, ValueError, DesktopControlError):
+        pass
+
+    try:
+        (_, _, image), capabilities = app_tools.discover(processes)
+    except DesktopControlError:
+        return 'unknown'
+    if 'navigate_to_codex_page' in capabilities and supports_queue_command(image):
+        return 'ready'
+    return 'limited'
+
 
 def qq_connection_status(data: Path):
     from launcher import read_cc_connect_pid, _read_service_state

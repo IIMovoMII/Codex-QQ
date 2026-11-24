@@ -136,12 +136,16 @@ def pipe_server_identity(pipe: Any) -> tuple[str, float, str]:
     pid = wintypes.ULONG()
     if not get_pid(pipe.handle, ctypes.byref(pid)):
         raise DesktopControlError("server-identity-unavailable")
+    return desktop_process_identity(pid.value)
+
+
+def desktop_process_identity(pid: int) -> tuple[str, float, str]:
     from launcher import _query_process_identity
-    value = _query_process_identity(pid.value)
+    value = _query_process_identity(pid)
     image, created = value.get("process_image"), value.get("process_start_time")
     if not image or not created:
         raise DesktopControlError("server-identity-unavailable")
-    return f"{pid.value}:{image}:{created}", float(created), image
+    return f"{pid}:{image}:{created}", float(created), image
 
 
 class DesktopClient:

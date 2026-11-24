@@ -15,18 +15,21 @@
     if (s.runtime === 'stopped') return { title: '助手已停止', detail: 'QQ 监听与通知投递当前未运行。', icon: 'play', tone: 'warning', action: 'start', actionText: '启动助手' };
     if (s.runtime === 'unknown' || s.qq === 'unknown' || s.codex === 'unknown') return { title: '状态待核对', detail: '最近一次状态检查未能确认所有连接。', icon: 'warning', tone: 'warning', action: 'check', actionText: '重新检查' };
     if (s.qq === 'offline') return { title: 'QQ 连接需要处理', detail: '助手仍在运行，请检查 QQ 网关连接。', icon: 'offline', tone: 'danger', action: 'qq', actionText: '检查 QQ 连接' };
-    if (s.codex === 'offline') return { title: '等待 Codex', detail: '助手和 QQ 已就绪，Codex Desktop 当前未运行。', icon: 'monitor', tone: 'info', action: 'codex', actionText: '查看连接' };
+    if (s.codex === 'offline') return { title: '等待 Codex', detail: '助手和 QQ 已就绪，Codex Desktop 当前未运行。', icon: 'monitor', tone: 'info', action: 'codex', actionText: '打开 Codex' };
+    if (s.codex === 'limited') return { title: 'Codex 控制受限', detail: '任务提醒运行中，引用控制与运行中排队暂不可用。', icon: 'monitor', tone: 'warning', action: 'connections', actionText: '查看连接' };
     return { title: '已就绪', detail: '助手正在运行，Codex 与 QQ 已连接。', icon: 'check', tone: 'success', action: 'codex', actionText: '打开 Codex' };
   });
   function primary() {
     if (heroState.action === 'setup') onopen('setup');
     else if (heroState.action === 'codex') void app.run('open_codex');
+    else if (heroState.action === 'connections') onopen('codex');
     else if (heroState.action === 'qq') onopen('qq');
     else if (heroState.action === 'start') onconfirm('start');
     else void app.refresh();
   }
   function statusFor(value: string, label: string) {
     if (value === 'ready') return { label, tone: 'success' };
+    if (value === 'limited') return { label: '控制受限', tone: 'warning' };
     if (value === 'offline') return { label: '需要处理', tone: 'danger' };
     if (value === 'stopped') return { label: '已停止', tone: 'warning' };
     return { label: '待核对', tone: 'warning' };
@@ -60,7 +63,7 @@
       <div class="hero-copy"><h2 class="hero-title">{heroState.title}</h2><p class="hero-description">{heroState.detail}</p></div>
       <div class="hero-actions">
         <Button variant="primary" icon={heroState.action === 'codex' && heroState.title === '已就绪' ? 'external' : heroState.action === 'start' ? 'play' : heroState.action === 'check' ? 'refresh' : 'arrow'} onclick={primary} loading={app.pending.length > 0}>{heroState.actionText}</Button>
-        {#if app.snapshot.configured}<button class="text-button hero-secondary" onclick={() => onopen('codex')}>查看连接 <Icon name="right" size={17} /></button>{/if}
+        {#if app.snapshot.configured && heroState.action !== 'connections'}<button class="text-button hero-secondary" onclick={() => onopen('codex')}>查看连接 <Icon name="right" size={17} /></button>{/if}
       </div>
     </div>
     <div class="hero-divider"></div>

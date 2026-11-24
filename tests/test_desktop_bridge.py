@@ -207,6 +207,15 @@ class DesktopBridgeTests(unittest.TestCase):
         self.assertTrue(snapshot['hooksInstalled'])
         self.assertEqual(snapshot['hooksTrust'], 'unknown')
 
+    def test_check_connections_refreshes_codex_before_snapshot_cache_expires(self) -> None:
+        with patch('desktop_bridge.codex_connection_status', side_effect=['limited', 'ready']) as probe:
+            self.assertEqual(self.bridge.snapshot()['codex'], 'limited')
+            self.assertEqual(self.bridge.snapshot()['codex'], 'limited')
+            result = self.bridge.handle({'version': 1, 'requestId': 'refresh', 'command': 'check_connections'})
+        self.assertEqual(result['status'], 'confirmed')
+        self.assertEqual(result['data']['snapshot']['codex'], 'ready')
+        self.assertEqual(probe.call_count, 2)
+
     def test_takeover_waits_for_resident_lock_after_monitor_pid_disappears(self) -> None:
         from runtime_io import acquire_file_lock
         lock_path = self.bridge.data_dir / 'state/app.lock'

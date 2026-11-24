@@ -43,6 +43,7 @@ class QQDesktopBridgeTests(unittest.TestCase):
                  patch('control_contract._bundle_path', return_value=bundle) as verified_bundle, \
                  patch('qq_desktop_bridge.shutil.which', return_value='old-npm/codex.cmd') as old_path:
                 backend_type.return_value.process_image = 'current-verified-desktop'
+                backend_type.return_value.probe.return_value = ('current-owner', 0)
                 self.assertEqual(_codex_command(), [str(executable)])
                 backend_type.return_value.probe.assert_called_once_with()
                 verified_bundle.assert_called_once_with('current-verified-desktop')
@@ -266,7 +267,7 @@ class BridgeProcessEncodingTests(unittest.TestCase):
             probe = (
                 "import json,sys; "
                 "expected=json.loads(sys.argv[1]); "
-                "actual=sys.argv[sys.argv.index('--message')+1]; "
+                "actual=next(arg.split('=',1)[1] for arg in sys.argv[2:] if arg.startswith('--message=')); "
                 "actual.encode('utf-8',errors='strict'); "
                 "thread=sys.argv[sys.argv.index('--thread')+1]; "
                 "print('Queued message 00000000-0000-4000-8000-000000000009 for thread '+thread+'.'); "

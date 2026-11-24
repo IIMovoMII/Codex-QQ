@@ -23,7 +23,7 @@
     { title: '本机环境', detail: '系统、运行时与应用目录', tone: checked && app.checks.codexHome ? 'success' : 'neutral', state: checked ? app.checks.codexHome ? '目录可读' : '需要处理' : '尚未检查' },
     { title: '助手运行', detail: '监听器与助手进程', tone: app.snapshot.runtime === 'ready' ? 'success' : 'warning', state: app.snapshot.runtime === 'ready' ? '运行中' : app.snapshot.runtime === 'stopped' ? '已停止' : '待核对' },
     { title: 'QQ 连接', detail: 'QQ 网关与本地接口', tone: app.snapshot.qq === 'ready' ? 'success' : app.snapshot.qq === 'offline' ? 'danger' : 'warning', state: app.snapshot.qq === 'ready' ? '已连接' : app.snapshot.qq === 'offline' ? '连接中断' : '待核对' },
-    { title: 'Codex 连接', detail: 'Desktop 连接与能力检查', tone: app.snapshot.codex === 'ready' ? 'success' : 'warning', state: app.snapshot.codex === 'ready' ? '可用' : '待检查' },
+    { title: 'Codex 连接', detail: 'Desktop 连接与能力检查', tone: app.snapshot.codex === 'ready' ? 'success' : 'warning', state: app.snapshot.codex === 'ready' ? '可用' : app.snapshot.codex === 'limited' ? '控制受限' : '待检查' },
     ...(app.snapshot.hooks === 'unknown' ? [] : [{ title: '提醒钩子', detail: '安装与启用状态', tone: app.snapshot.hooks === 'ready' ? 'success' : 'warning', state: app.snapshot.hooks === 'ready' ? '配置就绪' : '需要处理' }]),
     { title: 'Windows 自启', detail: '实际登录效果另行验证', tone: app.snapshot.startupConfiguredVerified ? 'success' : 'warning', state: app.snapshot.startupConfiguredVerified ? '系统配置已回读' : '系统配置待核对' },
   ]);

@@ -178,6 +178,8 @@ class ControlRouter:
                     outcome, reply = 'rejected', f'未执行新操作：{detail}（{code}）。请运行助手 doctor 检查 Desktop/桥接连接；没有通过其他路径重发。'
                 elif str(error).startswith('no-client-found') or str(error) in ('owner-mismatch', 'owner-changed-before-dispatch'):
                     outcome, reply = 'rejected', '无法连接该对话的当前窗口：聊天记录存在，但没有可响应的窗口所有者（未载入、切换窗口或正在重连）。请在电脑点开这个对话后重发；本条不会以后补执行。'
+                elif str(error) == 'native-thread-target-unverified':
+                    outcome, reply = '本机 Codex 无法核对引用中的对话。请发送“对话”选择本机目标。'
                 elif str(error) == 'request-version-mismatch':
                     outcome, reply = 'rejected', '该操作的原生接口版本不匹配；不是聊天记录丢失，也不能靠换对话解决。未执行，请更新桥接适配。'
                 elif str(error) in ('frame-too-large', 'frame-too-large-unrecoverable',
@@ -301,7 +303,7 @@ class ControlRouter:
         """
         thread_id = row['id']
         try:
-            self.backend.ensure_owner(thread_id)
+            self._backend_call('ensure_owner', thread_id, connection=connection)
             return '已连接。', 'confirmed'
         except (OSError, TimeoutError, DesktopControlError) as owner_error:
             owner_detail = f'{type(owner_error).__name__}/{str(owner_error)[:80]}'
@@ -311,7 +313,7 @@ class ControlRouter:
         deadline = time.monotonic() + 3.0
         while True:
             try:
-                self.backend.ensure_owner(thread_id)
+                self._backend_call('ensure_owner', thread_id, connection=connection)
                 return '已打开并连接。', 'confirmed'
             except (OSError, TimeoutError, DesktopControlError):
                 if time.monotonic() >= deadline:
@@ -553,7 +555,11 @@ class ControlRouter:
                 return self._thread_route_failure(scope, row, load_detail, meta['_desktop_identity']), load_state
         if not row:
             return "目标对话不存在或不属于可控制的本地对话，请重新选择。", "rejected"
+        connection = meta['_desktop_identity']
+        app_tools_only = getattr(self.backend, 'app_tools_connection', None) == connection
         if kind == "thread" and not text:
+            if app_tools_only:
+                return self._selected_thread_card(scope, row, connection)
             return "已识别引用的 Codex 对话。\n" + self._thread_card(scope, row, connection=meta['_desktop_identity']), "confirmed"
         extended = actions.command(thread_id, command, arg)
         if extended is not None:
@@ -634,9 +640,11 @@ class ControlRouter:
             payload.encode("utf-8", errors="strict")
         except UnicodeEncodeError:
             return "消息包含损坏字符，未发送，请重新输入原文。", "rejected"
-        # Idle/paused starts a turn; busy messages append through `codex queue`,
-        # never through Desktop's whole-snapshot replacement method.
-        result = self.backend.submit_message(thread_id, payload, meta['_desktop_identity'],
+        if app_tools_only and row.get('source') != 'reference':
+            load_detail, load_state = self._ensure_thread_loaded(row, connection)
+            if load_state != 'confirmed':
+                return self._thread_route_failure(scope, row, load_detail, connection), load_state
+        result = self.backend.submit_message(thread_id, payload, connection,
                                              str(uuid.uuid4()), self.queue_func)
         if result['state'] != 'confirmed':
             return result['reply'], result['state']
@@ -662,6 +670,9 @@ class ControlRouter:
                 observed = self.backend.submission_status(receipt, self.catalog, meta['_desktop_identity'])
                 receipt['client_id'] = observed.get('client_id')
                 body = f"{self.catalog.label(row)}\n已提交给 Codex。\n队列编号：{queue_id}\n{status_text(observed)}"
+                if app_tools_only:
+                    body += '\n\n引用本条回复“状态”可查看本条。需要移除时，请在电脑的 Codex 待发送列表操作。'
+                    return self._card(scope, 'submission', receipt, body, ttl=30 * 86400), 'confirmed'
                 body += '\n\n引用本条回复“状态”查看这一条；回复“删除”仅移除仍在排队的本条消息。'
                 body += '\n此发送回执不支持直接转引导；引用“对话”返回的回执发“队列”，可查看并操作仍可核实的原生队列项。'
                 return self._card(scope, 'submission', receipt, body, ttl=30 * 86400), 'confirmed'

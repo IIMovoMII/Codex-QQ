@@ -3,9 +3,8 @@
 这个文件不是一个新的智能体。它实现 CC Connect 的 ACP 标准输入输出，
 只负责这些本地控制：
 
-* 现行 ControlRouter 要求逐条引用，空闲/暂停时走原生开始新一轮；
-  运行中使用当前 Desktop 配套 CLI 追加原生队列，核对唯一回执，
-  不替换整份 Desktop 队列，也不在未知后重发；
+* ControlRouter 逐条核对引用。新版 Desktop 通过配套 CLI 接受普通
+  消息，按原生队列处理。旧连接保留空闲/暂停时开始新一轮的入口。
 * 从 QQ 的“引用提醒”中提取完整线程编号，再把用户的回复排入对应
   Codex Desktop 对话；不从旧选择猜测本条目标。
 * 把明确的“暂停”指令交给拥有该对话的 Desktop 窗口，执行原生停止。
@@ -209,30 +208,31 @@ def parse_control_message(
     return "queue", current_thread, text
 
 
-def _desktop_codex_command() -> list[str] | None:
-    """Use the CLI shipped with the actual IPC owner, independent of PATH.
+def _desktop_codex_command(expected_connection: str | None = None) -> list[str] | None:
+    """Use the CLI shipped with the verified Desktop process, independent of PATH.
 
     Explorer may inherit an older npm shim even though the open Desktop uses
     a newer queue contract. Resolve only within its verified bundle; never
     install, update, or run a different CLI after a submission has begun.
     """
     from control_backend import NativeBackend
-    from control_contract import _bundle_path
+    from control_contract import bundled_codex_cli
     from desktop_control import DesktopControlError
 
     try:
         backend = NativeBackend()
-        backend.probe()
-        bundle = _bundle_path(backend.process_image or '')
-        executable = (bundle.parent / 'codex.exe').resolve(strict=True)
-        if executable.parent == bundle.parent and executable.is_file():
-            return [str(executable)]
+        identity, _ = backend.probe()
+        if expected_connection is not None and identity != expected_connection:
+            return None
+        return [str(bundled_codex_cli(backend.process_image or ''))]
     except (DesktopControlError, OSError, ValueError, TimeoutError):
         pass
     return None
 
 
-def _codex_command() -> list[str] | None:
+def _codex_command(expected_connection: str | None = None) -> list[str] | None:
+    if expected_connection is not None:
+        return _desktop_codex_command(expected_connection)
     configured = os.environ.get("CODEX_QUEUE_BIN", "").strip()
     if configured:
         resolved = shutil.which(configured) or (configured if Path(configured).is_file() else '')
@@ -246,7 +246,8 @@ def _codex_command() -> list[str] | None:
     return None
 
 
-def queue_to_desktop(thread_id: str, message: str, *, timeout_seconds: float = 20.0) -> tuple[bool | None, str]:
+def queue_to_desktop(thread_id: str, message: str, *, timeout_seconds: float = 20.0,
+                     expected_connection: str | None = None) -> tuple[bool | None, str]:
     if not valid_thread_id(thread_id):
         return False, "线程编号格式不正确。"
     if not message.strip():
@@ -255,10 +256,11 @@ def queue_to_desktop(thread_id: str, message: str, *, timeout_seconds: float = 2
         message.encode("utf-8", errors="strict")
     except UnicodeEncodeError:
         return False, "消息包含损坏的字符，未发送；请重新输入原文。"
-    command = _codex_command()
+    command = _codex_command() if expected_connection is None else _codex_command(expected_connection)
     if command is None:
-        return False, "找不到当前 Codex Desktop 配套的队列程序；未发送，请确认 Codex 正在运行。"
-    command.extend(["queue", "--thread", thread_id, "--message", message])
+        return False, "未能核对当前 Codex 连接和配套队列程序。请重新检查连接。"
+    # The equals form keeps a reply beginning with a dash inside the value.
+    command.extend(["queue", "--thread", thread_id, "--message=" + message])
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
         result = subprocess.run(
@@ -278,10 +280,9 @@ def queue_to_desktop(thread_id: str, message: str, *, timeout_seconds: float = 2
     except OSError as error:
         return False, f"启动 codex queue 失败：{type(error).__name__}。"
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout or "").strip().replace("\r", " ").replace("\n", " ")
-        if len(detail) > 240:
-            detail = detail[:240] + "…"
-        return False, f"codex queue 返回错误{(': ' + detail) if detail else '。'}"
+        # Failure after process startup can follow native admission. CLI error
+        # bodies may also contain the user's prompt or local installation paths.
+        return None, f"Codex 队列命令退出码为 {result.returncode}"
     # Keep the exact native acknowledgement. A zero exit code alone says
     # nothing about whether the queued message has begun model execution.
     return True, (result.stdout or '').strip()[:4096]

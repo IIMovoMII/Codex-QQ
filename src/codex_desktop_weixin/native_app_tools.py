@@ -16,7 +16,8 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from desktop_control import DesktopControlError, WindowsDesktopPipe, pipe_server_identity, public_error_code
+from desktop_control import (DesktopControlError, WindowsDesktopPipe, desktop_process_identity,
+                             pipe_server_identity, public_error_code)
 from control_contract import check_app_tools_contract
 from tool_schema import validate_arguments
 from endpoint_hint import PIPE_NAME, MAX_ENDPOINT_CANDIDATES, discover_native_endpoints
@@ -24,10 +25,22 @@ from endpoint_hint import PIPE_NAME, MAX_ENDPOINT_CANDIDATES, discover_native_en
 ALLOWED_TOOLS = frozenset({'read_thread', 'list_projects', 'set_thread_title', 'create_thread', 'fork_thread', 'navigate_to_codex_page'})
 WRITE_TOOLS = frozenset({'set_thread_title', 'create_thread', 'fork_thread', 'navigate_to_codex_page'})
 THREAD_ID = re.compile(r'^[A-Za-z0-9_-]{20,100}$')
+LOCAL_THREAD_ID = re.compile(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}')
 
 
 class NativeToolError(DesktopControlError):
     pass
+
+
+def desktop_identities(pids: set[int] | None = None) -> list[tuple[str, float, str]]:
+    from process_watch import codex_desktop_root_pids
+    identities = []
+    for pid in sorted(codex_desktop_root_pids() if pids is None else pids):
+        try:
+            identities.append(desktop_process_identity(pid))
+        except DesktopControlError:
+            continue
+    return identities
 
 
 class NativeAppTools:
@@ -154,9 +167,23 @@ class NativeAppTools:
             names.add(name)
         return names
 
-    def capabilities(self, expected_identity: str) -> set[str]:
-        with self._connection(expected_identity, 5.0) as (_, catalog):
+    def capabilities(self, expected_identity: str, *, timeout_seconds: float = 5.0) -> set[str]:
+        with self._connection(expected_identity, timeout_seconds) as (_, catalog):
             return self._catalog(catalog)
+
+    def discover(self, processes: list[tuple[str, float, str]]) -> tuple[tuple[str, float, str], set[str]]:
+        deadline = time.monotonic() + 2.0
+        for process in processes:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                capabilities = self.capabilities(process[0], timeout_seconds=remaining)
+                if 'read_thread' in capabilities:
+                    return process, capabilities
+            except (OSError, ValueError, DesktopControlError):
+                continue
+        raise NativeToolError('native-app-tools-endpoint-unavailable')
 
     def call(self, tool: str, arguments: dict, *, source_thread_id: str,
              expected_identity: str, operation_id: str, mutation: bool = False) -> dict:
@@ -205,7 +232,7 @@ class NativeAppTools:
             return {'state': 'unknown' if mutation and dispatched else 'rejected',
                     'reason': 'native-app-tools-confirmation-lost' if dispatched else 'native-app-tools-unavailable'}
 
-    def thread(self, thread_id: str, expected_identity: str) -> dict:
+    def read_thread(self, thread_id: str, expected_identity: str) -> dict:
         result = self.call('read_thread', {'threadId': thread_id, 'turnLimit': 1,
                            'includeOutputs': False, 'maxOutputCharsPerItem': 0},
                            source_thread_id=thread_id, expected_identity=expected_identity,
@@ -216,6 +243,10 @@ class NativeAppTools:
         if (not isinstance(row, dict) or row.get('id') != thread_id
                 or row.get('kind') != 'codex' or row.get('hostId') != 'local'):
             raise NativeToolError('native-thread-target-unverified')
+        return result['data']
+
+    def thread(self, thread_id: str, expected_identity: str) -> dict:
+        row = self.read_thread(thread_id, expected_identity)['thread']
         return {k: row.get(k) for k in ('id', 'title', 'hostId', 'kind', 'status', 'cwd')}
 
     @staticmethod

@@ -1,0 +1,11 @@
+{
+  "version": "1.0.3",
+  "notes": "## Codex QQ 助手 1.0.3\n\n恢复新版 Codex Desktop 的本机连接、QQ 引用和运行中排队。引用目标发送正文，忙时会进入该对话的待发送队列，空闲时会自动开始新一轮。新版 Codex 的暂停、续接暂停、即时引导和删除待发送项可在电脑端操作。\n\n### 下载与升级\n\n- 下载 **CodexQQ-Setup-1.0.3-windows-x64.exe**。安装包内置 Python 和 QQ 网关，适用于 Windows 10/11 x64。\n- **1.0.2 及更早版本请手动覆盖安装一次。** 等当前任务和通知投递结束，从托盘退出 QQ 助手，然后运行新版 EXE。已有绑定和运行数据会保留。\n- 1.0.3 启用了新的更新签名。安装后，后续版本可在应用的「更新」页安装。\n- 用 SHA256SUMS.txt 核对下载。发行包含应用更新签名、依赖清单和许可证。Windows Authenticode 代码签名尚未配置。\n",
+  "pub_date": "2026-11-24T17:14:03.698243+00:00",
+  "platforms": {
+    "windows-x86_64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTU2dLZ0U5VnNGcjV1TUxkMmZjRU9wcUxPQmFnQjUwZmlBc3hTekMvRFlMZEh1eGo5N1BGOUNWV2RiN0pyZ3ZnbTZTL1R4YndPWmg1ZWVaWmgrVFVQZEZDdmRVcVpjSVEwPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzk1NTQwMjMwCWZpbGU6Q29kZXggUVEg5Yqp5omLXzEuMC4zX3g2NC1zZXR1cC5leGUJdmVyc2lvbjoxLjAuMwpOUGVuWmhZMGcwYjlMVjhVZmpGTWxLcFRwYllUQUZ1VUZXNDk4b3hNWVE1aFNpRDRnODlaS3czTmRSbWtVNG15cHkyQm5OaGk4QWNqdnNtVitKNGJEQT09Cg==",
+      "url": "https://github.com/IIMovoMII/Codex-QQ/releases/download/app-v1.0.3/CodexQQ-Setup-1.0.3-windows-x64.exe"
+    }
+  }
+}
